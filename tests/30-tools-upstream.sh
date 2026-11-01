@@ -20,6 +20,20 @@ assert_contains "trivy version" "Version: $TRIVY_VERSION" "$(run_in -- trivy --v
 assert_absent "curlie is not bundled" "$(run_in -- sh -c 'command -v curlie; echo CURLIE_CHECK_RAN')" "CURLIE_CHECK_RAN" "curlie"
 assert_contains "golangci-lint version" "version $GOLANGCI_LINT_VERSION " "$(run_in -- golangci-lint --version)"
 assert_contains "tea version" "$TEA_VERSION" "$(run_in -- tea --version)"
+assert_eq "node version" "v$NODE_VERSION" "$(run_in -- node --version)"
+# shellcheck disable=SC2016 # expands in the container
+assert_eq "node is the upstream build" "/opt/node/bin/node" "$(run_in -- sh -c 'readlink -f "$(command -v node)"')"
+# shellcheck disable=SC2016 # expands in the container
+assert_eq "npm is the copy bundled with node" "/opt/node/lib/node_modules/npm/bin/npm-cli.js" "$(run_in -- sh -c 'readlink -f "$(command -v npm)"')"
+assert_eq "node ships its license" "present" "$(run_in -- sh -c 'test -s /opt/node/LICENSE && echo present')"
+# shellcheck disable=SC2016 # expands in the container
+# Any package state other than not-installed counts (installed, held, half-installed).
+assert_absent "apt nodejs and npm are not installed" \
+	"$(run_in -- sh -c 'dpkg-query -W -f="\${Package} \${db:Status-Status}\n" nodejs npm 2>/dev/null; echo DPKG_CHECK_RAN')" \
+	DPKG_CHECK_RAN "nodejs installed" "nodejs half-" "nodejs unpacked" "nodejs config-files" "nodejs triggers" "npm installed" "npm half-" "npm unpacked" "npm config-files" "npm triggers"
+assert_eq "no apt node binary" "none" "$(run_in -- sh -c 'ls /usr/bin/node 2>/dev/null || echo none')"
+assert_eq "npm update notifier is off" "false" "$(run_in -- npm config get update-notifier)"
+assert_eq "no Node headers or docs shipped" "none" "$(run_in -- sh -c 'ls -d /opt/node/include /opt/node/share /opt/node/README.md /opt/node/CHANGELOG.md 2>/dev/null || echo none')"
 # find prints END only when it exits 0, so a missing or unreadable path fails these checks
 # with find's error message in the output instead of passing on an empty result.
 assert_eq "everything under /opt and /usr/local is root-owned" "END" \

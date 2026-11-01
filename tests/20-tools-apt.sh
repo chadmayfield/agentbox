@@ -19,7 +19,6 @@ assert_contains "ping works without NET_RAW" "1 received" \
 assert_contains "fd runs" "fd" "$(run_in -- fd --version)"
 assert_contains "bat runs" "bat" "$(run_in -- bat --version)"
 assert_contains "python is 3.14" "Python 3.14" "$(run_in -- python3 --version)"
-assert_contains "node is 22" "v22." "$(run_in -- node --version)"
 assert_contains "tmux runs" "tmux 3.6" "$(run_in -- tmux -V)"
 assert_contains "pip --user is refused (PEP 668)" "externally-managed" "$(run_in -- sh -c 'python3 -m pip install --user requests 2>&1 || true')"
 

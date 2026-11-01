@@ -24,7 +24,7 @@ done
 assert_eq "claude is the native binary, not a link" "file" \
 	"$(run_in -- sh -c 'if [ -f /usr/local/bin/claude ] && [ ! -L /usr/local/bin/claude ]; then echo file; else echo other; fi')"
 assert_absent "no npm Claude Code package" \
-	"$(run_in -- sh -c 'ls -d /usr/local/lib/node_modules/@anthropic-ai 2>/dev/null; echo END')" END "@anthropic-ai"
+	"$(run_in -- sh -c 'ls -d /usr/local/lib/node_modules/@anthropic-ai /opt/node/lib/node_modules/@anthropic-ai 2>/dev/null; echo END')" END "@anthropic-ai"
 # shellcheck disable=SC2016 # expands in the container
 assert_eq "update locks in the environment" "1 true 1 1" \
 	"$(run_in -- sh -c 'echo $DISABLE_UPDATES $AGY_CLI_DISABLE_AUTO_UPDATE $OPENCODE_DISABLE_AUTOUPDATE $CLAUDE_CODE_NONBLOCKING_STDOUT')"

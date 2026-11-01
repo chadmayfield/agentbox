@@ -45,6 +45,8 @@ assert_eq "npm global prefix is usable in persist mode" "rc=0" \
 	"$(run_in --network none -e AGENTAINER_TOOLS=persist -- agentainer-entrypoint sh -c 'npm ls -g --depth=0 >/dev/null 2>&1; echo rc=$?')"
 assert_eq "npm -g installs in persist mode" "rc=0" "$(run_in $H -v "$fixtures" --network none -e AGENTAINER_TOOLS=persist -- agentainer-entrypoint sh -c "$npm_fixture; echo rc=\$?")"
 assert_contains "persist keeps tools" "/home/agent/.agentainer/tools" "$(run_in $H -e AGENTAINER_TOOLS=persist -- agentainer-entrypoint sh -c 'readlink -f "$(command -v fixture-npm)"')"
+assert_contains "npx runs a local package offline" "fixture-npm ok" \
+	"$(run_in -v "$fixtures" --network none -- agentainer-entrypoint sh -c 'fx=$(bash /fixtures/make-tools.sh) && npx --offline --yes "file:$fx/fixture.tgz"')"
 assert_contains "tools status shows the selected persistent root" "root: /home/agent/.agentainer/tools" "$(run_in $H -e AGENTAINER_TOOLS=persist -- agentainer-entrypoint agentainer-tools status)"
 
 # uv tool and go install land in the active root too.
