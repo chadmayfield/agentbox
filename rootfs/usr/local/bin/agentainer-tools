@@ -19,7 +19,10 @@ status)
 reset)
 	mkdir -p "$HOME/.agentainer"
 	exec 9>"$HOME/.agentainer/.tools-reset.lock"
-	flock -w 30 9
+	if ! flock -w 30 9; then
+		echo "agentainer-tools: $HOME/.agentainer/.tools-reset.lock is still held after 30 seconds by another reset or an agentainer-extras install or remove; try again when it finishes" >&2
+		exit 1
+	fi
 	dir="$HOME/.agentainer/tools"
 	if [ -d "$dir" ]; then
 		# Reserve a unique destination, including across container PID namespaces.

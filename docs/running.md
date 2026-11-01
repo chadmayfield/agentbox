@@ -67,6 +67,19 @@ Each mapping is `[IPv4:]HOST_PORT:CONTAINER_PORT[/tcp|udp]`:
 | Joined forms | `--publish=3000:3000`, `-p3000:3000` | Accepted |
 | IPv6, port ranges, automatic host ports | | Not supported; use a direct runtime command |
 
+The [optional extras](extras.md) Kandev and OpenChamber are web apps that need a published port:
+
+```sh
+# Kandev
+bin/agentainer up --publish 38429:38429 "$HOME/code"
+kandev --port 38429 --headless                       # inside the container
+# OpenChamber
+bin/agentainer up --publish 3000:3000 "$HOME/code"
+openchamber --lan --port 3000 --ui-password '<password>'   # inside the container
+```
+
+Kandev's local mode is not an authenticated multi-user boundary, and OpenChamber needs `--ui-password` to protect browser access, so keep the default `127.0.0.1` host binding ([Kandev](extras.md#kandev), [OpenChamber](extras.md#openchamber)).
+
 Ports must be 1 through 65535. For a remote engine, the bind address belongs to the engine host. With a local VM, reachability also depends on the runtime's port forwarding.
 
 The launcher validates mappings before it creates a container and before it pulls an update. With no `--publish` option, it publishes no ports. `update` keeps the recorded mappings. Containers created by older launchers without a ports label publish no ports. To change the mappings, recreate the container with new `up` options; the home stays.

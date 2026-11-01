@@ -59,6 +59,7 @@ The agent pod has startup and readiness probes with a three-minute startup allow
 - Port forwarding (`ssh -L`, `ssh -R`), socket forwarding and X11 forwarding are off: ContainerSSH disables them by default and the example keeps that.
 - The ContainerSSH-to-webhook traffic is plain HTTP inside the cluster. The example has no server-side TLS configuration; adding it requires a server change or TLS-terminating proxy. ContainerSSH's webhook client accepts `cacert`, `cert` and `key` settings for TLS (`config/http.go` in ContainerSSH v0.6.0).
 - Resource requests and limits on all three pods are example values.
+- [Kandev](extras.md#kandev), an optional extra, listens on `0.0.0.0` by default, and its local mode is "not an authenticated multi-user boundary". In the pod, start it with `KANDEV_SERVER_HOST=127.0.0.1` and reach it with `kubectl -n agentainer port-forward pod/agentainer-0 38429:38429` ([Kandev CLI, Ports and network exposure](https://kandev.ai/docs/cli)). Not verified in a cluster.
 - To turn sudo on, follow the comment in [`agentainer/statefulset.yaml`](../deploy/kubernetes/agentainer/statefulset.yaml). The capability list there is untested, and the pod then needs the Baseline profile.
 
 ## SSH port access

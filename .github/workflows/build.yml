@@ -117,6 +117,35 @@ jobs:
         run: sh tests/host/test-build-script.sh
       - name: Fetch tests
         run: sh tests/host/test-fetch.sh
+      - name: Extras catalog tests
+        run: sh tests/host/test-extras-catalog.sh
+      - name: Extras lockfile vulnerability scan with trivy (report only)
+        shell: bash
+        run: |
+          set -eu
+          dir=rootfs/usr/local/share/agentainer/extras
+          if [ ! -d "$dir" ]; then
+            echo "No extras catalog at $dir; nothing to scan." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          scanner=$(sed -n 's/^TRIVY_SCANNER_IMAGE=//p' versions.env)
+          test -n "$scanner"
+          report=$RUNNER_TEMP/extras-report
+          mkdir -p "$report" && chmod 777 "$report"
+          # --exit-code 0: findings never fail the job. A scanner image or database
+          # download failure is reported as a warning, because this job gates the image job.
+          if ! docker run --rm -v "$PWD/$dir:/scan:ro" -v "$report:/report" "$scanner" \
+            fs --scanners vuln --exit-code 0 --format json --output /report/extras.json /scan; then
+            echo "::warning::Extras lockfile scan did not run (scanner or database download failed)."
+            echo "Extras lockfile scan did not run." >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! out=$(python3 scripts/vuln_summary.py "extras=$report/extras.json"); then
+            echo "::warning::Extras lockfile scan report could not be read."
+            echo "Extras lockfile scan report could not be read." >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          { echo "Extras lockfiles in $dir:"; echo; printf '%s\n' "$out"; } >>"$GITHUB_STEP_SUMMARY"
 
   image:
     name: image (${{ matrix.arch }})

@@ -145,6 +145,7 @@ Verified by hand: Codex and Antigravity listed a synced server's tools, and `cla
 - It covers these user package managers only, not OS packages installed with `sudo apt`.
 - When the image changes and persisted tools exist, the entrypoint warns on each start. `agentainer-tools reset` moves all persisted roots (Go, npm, cargo, uv, pipx and the Python user base) to a dated backup. Resets share a lock and reserve unique backup paths across containers.
 - `agentainer-tools status` shows the effective mode, the selected root and the entries in `bin`, `npm/bin` and `python/bin`. It does not list every package or cache.
+- `agentainer-extras` installs the optional tools the image pins (Kandev, OpenChamber, REA) into the same root ([Optional extras](extras.md)).
 
 Ubuntu's Python refuses `pip install` outside a virtual environment, `pip install --user` included (PEP 668), so use `uv`, `pipx` or a venv. `PYTHONUSERBASE` points into the same tools root, but plain `pip` never installs there.
 

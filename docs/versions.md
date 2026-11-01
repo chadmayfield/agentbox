@@ -11,6 +11,8 @@ This page covers what the image pins, how pins are updated, which release tag to
 - [Verifying a release before use](#verifying-a-release-before-use)
 - [Upstream publisher verification](#upstream-publisher-verification)
   - [Node.js release keyring](#nodejs-release-keyring)
+- [Optional extras](#optional-extras)
+  - [npm registry keys](#npm-registry-keys)
 
 ## Pinned inputs
 
@@ -31,6 +33,8 @@ Each tool is built in its own stage, so an update downloads only the layers that
 
 `/etc/agentainer/versions.json` in the image lists every pin and every installed apt package version.
 
+`versions.env` also pins the [optional extras](extras.md), which the image carries as lockfiles but does not install ([Optional extras](#optional-extras)).
+
 ## Agents do not update themselves
 
 | Agent | Setting |
@@ -48,7 +52,7 @@ On the 1st and 15th of each month at 06:00 UTC, [`.github/workflows/bump.yml`](.
 
 An update PR lists increases to the leading number of a three-part tool version under "Major-version upgrades" and asks the maintainer to acknowledge the compatibility review in its description. CI does not enforce that checkbox. Minor updates to tools below 1.0 can also break compatibility, so review their upstream notes as well ([Semantic Versioning](https://semver.org/)).
 
-The resolver follows current upstream release pointers with no minimum release age. Proposed binaries run in build and test jobs before anyone reviews the pull request. Checksums and publisher signatures establish byte identity and the signing identity, not that the code is safe, so review upstream changes before merging.
+The resolver follows current upstream release pointers with no minimum release age, except for the optional extras ([Optional extras](#optional-extras)). Proposed binaries run in build and test jobs before anyone reviews the pull request. Checksums and publisher signatures establish byte identity and the signing identity, not that the code is safe, so review upstream changes before merging.
 
 Run the same workflow manually through its `workflow_dispatch` trigger for an urgent security fix or an upstream change that breaks an agent. GitHub documents [scheduled](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule) and [manual](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch) triggers.
 
@@ -120,7 +124,7 @@ It pulls and starts the verified digest, so run it only where you intend to run 
 
 ## Upstream publisher verification
 
-The updater requires `gh`, `cosign` and GnuPG in addition to Python. The scheduled workflow installs cosign through its pinned installer action. [`scripts/verify_upstream.py`](../scripts/verify_upstream.py) checks supported publishers before the resolver writes any pins. A missing verification tool, missing signing asset, changed checksum or failed signature stops the update. Build downloads still check their pinned hashes.
+The updater requires `gh`, `cosign` and GnuPG in addition to Python. The scheduled workflow installs cosign through its pinned installer action. [`scripts/verify_upstream.py`](../scripts/verify_upstream.py) checks supported publishers before the resolver writes any pins. A missing verification tool, missing signing asset, changed checksum or failed signature stops the update. Build downloads still check their pinned hashes. The optional extras are the exception: a failed check keeps only that extra's pin ([Optional extras](#optional-extras)).
 
 | Download | Required publisher check |
 |---|---|
@@ -133,6 +137,7 @@ The updater requires `gh`, `cosign` and GnuPG in addition to Python. The schedul
 | Codex package | Sigstore bundle for the whole package from `openai/codex`, workflow `rust-release.yml` at the selected release tag. |
 | Claude Code | GPG-signed release manifest with the pinned Anthropic key fingerprint. |
 | Node.js | GPG-signed `SHASUMS256.txt` by one of the release keys in `scripts/keys/nodejs-release-keys.asc`. |
+| Optional extras (npm) | npm registry signature on every lockfile entry, by a key in `scripts/keys/npm-registry-keys.json` ([Optional extras](#optional-extras)). |
 
 GitHub provenance checks require the exact workflow certificate identity, repository, source ref and GitHub OIDC issuer ([GitHub CLI verification](https://cli.github.com/manual/gh_attestation_verify), [CLI release workflow](https://github.com/cli/cli/blob/trunk/.github/workflows/deployment.yml), [uv release workflow](https://github.com/astral-sh/uv/blob/main/.github/workflows/release.yml), [Ruff release workflow](https://github.com/astral-sh/ruff/blob/main/.github/workflows/release.yml), [golangci-lint release workflow](https://github.com/golangci/golangci-lint/blob/main/.github/workflows/release.yml)). Sigstore bundle checks require the exact workflow certificate identity and GitHub OIDC issuer ([cosign blob verification](https://docs.sigstore.dev/cosign/verifying/verify_blob/), [yq signing workflow](https://github.com/mikefarah/yq/blob/master/.github/workflows/release.yml), [Trivy signing workflow](https://github.com/aquasecurity/trivy/blob/main/.github/workflows/reusable-release.yaml), [Codex signing action](https://github.com/openai/codex/blob/main/.github/actions/linux-code-sign/action.yml)).
 
@@ -168,3 +173,37 @@ Expiry dates of the eight keys in the current keyring, read with `gpg --list-key
 | Juan José Arboleda | none |
 
 Refresh the keyring before the earliest date.
+
+## Optional extras
+
+`versions.env` pins three npm tools that `agentainer-extras install` adds on request ([Optional extras](extras.md)):
+
+| Pin | npm package | Catalog directory |
+|---|---|---|
+| `KANDEV_VERSION` | [`kandev`](https://registry.npmjs.org/kandev) | `kandev` |
+| `OPENCHAMBER_VERSION` | [`@openchamber/web`](https://registry.npmjs.org/@openchamber/web) | `openchamber` |
+| `REA_VERSION` | [`rea-agents`](https://registry.npmjs.org/rea-agents) | `rea` |
+
+Each catalog directory, under `rootfs/usr/local/share/agentainer/extras/`, holds a `package.json` that depends on exactly the pinned version and a `package-lock.json` with an `integrity` hash for every package in the tree. The version in `package.json` must equal the `versions.env` pin, and `tests/host/test-extras-catalog.sh` checks this in CI.
+
+For each extra, [`scripts/bump_versions.py`](../scripts/bump_versions.py):
+
+1. Picks the newest stable, non-deprecated version, no newer than the `latest` dist-tag, whose publish time in the registry's `time` field is at least 7 days old. When that version is not newer than the pin, the pin and the catalog files stay as they are.
+2. Regenerates the lockfile with `npm install --package-lock-only --ignore-scripts --before=<now minus 7 days>`, so every dependency in the tree is also at least 7 days old ([npm `before`](https://docs.npmjs.com/cli/v11/using-npm/config#before)). It uses an empty npm user config and the public registry.
+3. Fails the extra when the new lockfile has a package with an install script (`hasInstallScript`, [package-lock.json](https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json)) that the committed lockfile did not have, unless the package is `node-pty` or `frida`. `agentainer-extras` installs with `--ignore-scripts`, so no install script runs; this check reports a change in the tree for review.
+4. Checks every lockfile entry against the registry. The entry must resolve from `https://registry.npmjs.org/`, its `integrity` must equal the registry's `dist.integrity` for that version, and one of the version's `dist.signatures` must verify with `openssl` over `<name>@<version>:<integrity>` with an ECDSA P-256 key in `scripts/keys/npm-registry-keys.json` ([npm registry signatures](https://docs.npmjs.com/about-registry-signatures)). A key with an `expires` time counts only for a version published before that time. A signature by an unknown key does not count. Bundled entries are covered by their parent's integrity; a `link` entry fails.
+
+A failed check for one extra, including a missing `npm` or `openssl`, keeps that extra's pin and catalog files and does not stop the run. The other pins still update. `bump_versions.py --failures FILE` writes one line per failed extra to FILE. In the scheduled workflow, the `extras-failures` job prints those lines in the run summary and fails the run after the pull request for the other pins is open.
+
+The pull request job applies the resolver's patch only when it modifies `versions.env`, `deploy/kubernetes/*/deployment.yaml` or an extras `package.json` or `package-lock.json`, and creates, deletes or renames no file ([`.github/actions/bump-pr/action.yml`](../.github/actions/bump-pr/action.yml)).
+
+CI's `lint-unit` job runs `tests/host/test-extras-catalog.sh` and scans the extras lockfiles with Trivy, using the `TRIVY_SCANNER_IMAGE` pin. The scan is report only: findings go to the job's step summary and never fail the job.
+
+### npm registry keys
+
+[`scripts/keys/npm-registry-keys.json`](../scripts/keys/npm-registry-keys.json) is a copy of `https://registry.npmjs.org/-/npm/v1/keys`. It holds two keys: `SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA`, which expired on 2025-01-29, and `SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U`, with no expiry. The scheduled update never changes this file. A signature by a key that is not in the file fails that extra's update until a maintainer refreshes the file in its own pull request:
+
+1. Download `https://registry.npmjs.org/-/npm/v1/keys`.
+2. Replace `scripts/keys/npm-registry-keys.json` with the downloaded document, unchanged. Every key must have `keytype` and `scheme` `ecdsa-sha2-nistp256`; `bump_versions.py` refuses any other.
+3. Update the date in the comment above `NPM_KEYS` in `scripts/bump_versions.py` and the key list in this section.
+4. Update the key IDs and expiry times in `test_registry_keys_file_pins_both_npm_keys` in `tests/unit/test_bump_versions.py`, then run the unit tests.

@@ -51,6 +51,32 @@ class BuildReportTests(unittest.TestCase):
         self.assertIn("sha256:ffffffffffff", out)
         self.assertIn("3 apt packages", out)
 
+    def test_versions_lists_extras_pins_apart_from_the_build(self):
+        path = self.write(json.dumps({
+            "pins": {"GO_VERSION": "1.27.2", "KANDEV_VERSION": "0.98.0", "OPENCHAMBER_VERSION": "2.5.1",
+                     "REA_VERSION": "6.8.0"},
+            "apt": {}}))
+        out = br.versions(path)
+        build, sep, extras = out.partition("### Optional extras (not installed)")
+        self.assertEqual(sep, "### Optional extras (not installed)")
+        self.assertIn("| go | 1.27.2 |", build)
+        for name in ("kandev", "openchamber", "rea"):
+            self.assertNotIn(name, build)
+        self.assertIn("| kandev | 0.98.0 |", extras)
+        self.assertIn("| openchamber | 2.5.1 |", extras)
+        self.assertIn("| rea | 6.8.0 |", extras)
+        self.assertNotIn("| go |", extras)
+        self.assertTrue(out.endswith("\n\n"))
+
+    def test_versions_without_extras_pins_has_no_extras_section(self):
+        out = br.versions(self.write(json.dumps({"pins": {"GO_VERSION": "1.27.2"}, "apt": {}})))
+        self.assertIn("| go | 1.27.2 |", out)
+        self.assertNotIn("Optional extras", out)
+
+    def test_extras_keys_come_from_the_bump_resolver(self):
+        self.assertEqual(br.extra_names(),
+                         {"KANDEV_VERSION": "kandev", "OPENCHAMBER_VERSION": "openchamber", "REA_VERSION": "rea"})
+
     def test_pins_shows_changes_only(self):
         old = self.write("# c\nGO_VERSION=1.27.1\nGO_SHA256_AMD64=" + "a" * 64 + "\nGONE=1\nSAME=x\n")
         new = self.write("GO_VERSION=1.27.2\nGO_SHA256_AMD64=" + "b" * 64 + "\nNEW=2\nSAME=x\n")
