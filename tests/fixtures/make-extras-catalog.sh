@@ -9,6 +9,7 @@
 #   fixture-optional/     pinned to 4.0.0, which has an optional dependency on
 #                         agentainer-extra-optional; omit_optional=no
 #   fixture-omit/         the same with omit_optional=yes
+#   fixture-two-bins/     pinned to 5.0.0, which has the bins fixture-extra and fixture-extra-two
 #   fixture-bad/          the 1.0.0 lockfile, with the tarball URL moved to a copy whose
 #                         bytes differ from the lockfile integrity
 # Install from it while the registry runs:
@@ -37,6 +38,12 @@ pack 2.0.0 2.0.0 "fixture-extra ok 2.0.0" registry/good/agentainer-extra-fixture
 pack 3.0.0 3.0.1 "fixture-extra ok 3.0.1" registry/good/agentainer-extra-fixture-3.0.0.tgz
 pack 4.0.0 4.0.0 "fixture-extra ok 4.0.0" registry/good/agentainer-extra-fixture-4.0.0.tgz "$optional"
 pack 1.0.0 1.0.0 "fixture-extra changed bytes" registry/bad/agentainer-extra-fixture-1.0.0.tgz
+rm -rf src/*
+printf '{"name":"agentainer-extra-fixture","version":"5.0.0","bin":{"fixture-extra":"cli.js","fixture-extra-two":"two.js"}}\n' >src/package.json
+printf '#!/usr/bin/env node\nconsole.log("fixture-extra ok 5.0.0")\n' >src/cli.js
+printf '#!/usr/bin/env node\nconsole.log("fixture-extra-two ok 5.0.0")\n' >src/two.js
+(cd src && npm pack --silent >/dev/null)
+mv src/agentainer-extra-fixture-5.0.0.tgz registry/good/
 rm -rf src/*
 printf '{"name":"agentainer-extra-optional","version":"1.0.0"}\n' >src/package.json
 (cd src && npm pack --silent >/dev/null)
@@ -75,6 +82,7 @@ def packument(name, versions):
 
 
 bin_ = {"bin": {"fixture-extra": "cli.js"}}
+two_bins = {"bin": {"fixture-extra": "cli.js", "fixture-extra-two": "two.js"}}
 opt = {"optionalDependencies": {"agentainer-extra-optional": "1.0.0"}}
 name = "agentainer-extra-fixture"
 packument(name, {
@@ -82,6 +90,7 @@ packument(name, {
     "2.0.0": manifest(name, "2.0.0", bin_),
     "3.0.0": manifest(name, "3.0.0", bin_),
     "4.0.0": manifest(name, "4.0.0", dict(bin_, **opt)),
+    "5.0.0": manifest(name, "5.0.0", two_bins),
 })
 packument("agentainer-extra-optional", {"1.0.0": manifest("agentainer-extra-optional", "1.0.0", {})})
 EOF
@@ -94,7 +103,7 @@ for _ in $(seq 50); do
 	sleep 0.1
 done
 
-# entry NAME VERSION CHECK [OMIT_OPTIONAL]: writes a catalog entry and generates its lockfile.
+# entry NAME VERSION CHECK [OMIT_OPTIONAL] [BINS]: writes a catalog entry and generates its lockfile.
 entry() {
 	mkdir -p "$1"
 	printf '{"private":true,"dependencies":{"agentainer-extra-fixture":"%s"}}\n' "$2" >"$1/package.json"
@@ -103,7 +112,7 @@ entry() {
 	cat >"$1/extra.conf" <<EOC
 package=agentainer-extra-fixture
 description="Offline test fixture"
-bins=fixture-extra
+bins="${5:-fixture-extra}"
 omit_optional=${4:-no}
 check='$3'
 notes="fixture notes: run fixture-extra"
@@ -116,6 +125,7 @@ entry fixture-check-fails 1.0.0 'exit 1'
 entry fixture-stdin 1.0.0 'read -r x'
 entry fixture-optional 4.0.0 'test -x node_modules/.bin/fixture-extra'
 entry fixture-omit 4.0.0 'test -x node_modules/.bin/fixture-extra' yes
+entry fixture-two-bins 5.0.0 'test -x node_modules/.bin/fixture-extra-two' no "fixture-extra fixture-extra-two"
 mkdir fixture-bad
 cp fixture/package.json fixture/extra.conf fixture-bad/
 sed 's#/good/#/bad/#' fixture/package-lock.json >fixture-bad/package-lock.json

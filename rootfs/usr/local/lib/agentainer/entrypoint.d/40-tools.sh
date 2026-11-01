@@ -43,8 +43,14 @@ write_stamp "$HOME/.agentainer/image-version"
 if [ "$mode" = persist ]; then
 	tstamp="$HOME/.agentainer/tools-image-version"
 	persisted=""
+	# Extras are left out. agentainer-extras installs them from the image's catalog, and
+	# their npm/bin links point into ../extras/. npm/extras itself is not listed.
 	for d in bin npm/bin python/bin python/lib; do
-		names=$(find "$HOME/.agentainer/tools/$d" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null | tr '\n' ' ')
+		if [ "$d" = npm/bin ]; then
+			names=$(find "$HOME/.agentainer/tools/$d" -mindepth 1 -maxdepth 1 ! -lname '../extras/*' -exec basename {} \; 2>/dev/null | tr '\n' ' ')
+		else
+			names=$(find "$HOME/.agentainer/tools/$d" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null | tr '\n' ' ')
+		fi
 		if [ -n "$names" ]; then persisted="$persisted $names"; fi
 	done
 	if [ -z "$persisted" ]; then

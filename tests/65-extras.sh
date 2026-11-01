@@ -147,6 +147,29 @@ out=$(ex "$c1" 'cat /tmp/wait.out')
 assert_contains "install waits for a held lock and names it" "waiting for $A/npm/.extras.lock" "$out"
 assert_contains "install finishes after the lock is free" "[rc=0]" "$out"
 
+# An upgrade that drops a command removes that command's link once the new version is linked.
+# A failed upgrade keeps every link, and links into other extras or elsewhere are kept.
+swap "$c1" fixture-two-bins
+assert_contains "two-bin install exits 0" "[rc=0]" "$(ex "$c1" 'agentainer-extras install fixture 2>&1; echo "[rc=$?]"')"
+assert_eq "two-bin install: both bins run" "fixture-extra ok 5.0.0 fixture-extra-two ok 5.0.0" \
+	"$(ex "$c1" 'fixture-extra; fixture-extra-two' | tr '\n' ' ' | sed 's/ $//')"
+ex "$c1" "ln -s ../extras/fixture2/node_modules/.bin/fixture-extra-two $A/npm/bin/fixture-other-extra && ln -s /usr/bin/true $A/npm/bin/fixture-elsewhere"
+swap "$c1" fixture-bad
+out=$(ex "$c1" 'agentainer-extras install fixture 2>&1; echo "[rc=$?]"; '"$names"'; fixture-extra-two; echo END')
+assert_contains "failed upgrade to one bin: exit 1" "[rc=1]" "$out"
+assert_contains "failed upgrade to one bin: keeps the first link" "[fixture-extra]" "$out"
+assert_contains "failed upgrade to one bin: keeps the dropped bin's link" "[fixture-extra-two]" "$out"
+assert_contains "failed upgrade to one bin: the dropped bin still runs" "fixture-extra-two ok 5.0.0" "$out"
+swap "$c1" fixture-v2
+out=$(ex "$c1" 'agentainer-extras install fixture 2>&1; echo "[rc=$?]"; '"$names"'; echo END')
+assert_contains "upgrade to one bin: exit 0" "[rc=0]" "$out"
+assert_absent "upgrade to one bin: removes the dropped bin's link" "$out" END "[fixture-extra-two]"
+assert_contains "upgrade to one bin: keeps a link into another extra" "[fixture-other-extra]" "$out"
+assert_contains "upgrade to one bin: keeps a link outside extras" "[fixture-elsewhere]" "$out"
+assert_eq "upgrade to one bin: the remaining bin runs" "fixture-extra ok 2.0.0" "$(ex "$c1" 'fixture-extra 2>&1')"
+ex "$c1" "rm -f $A/npm/bin/fixture-other-extra $A/npm/bin/fixture-elsewhere"
+swap "$c1" fixture
+
 # Remove.
 out=$(ex "$c1" 'agentainer-extras remove fixture 2>&1; echo "[rc=$?]"; '"$names"'; echo END')
 assert_contains "remove exits 0" "[rc=0]" "$out"
@@ -244,6 +267,18 @@ assert_contains "persist install lands in the home tools root" "/home/agent/.age
 "$RUNTIME" rm -f "$c2" >/dev/null
 assert_eq "persist install survives a new container" "fixture-extra ok 1.0.0" \
 	"$(run_in -v "$VOL:/home/agent" --network none -e AGENTAINER_TOOLS=persist -- fixture-extra 2>&1)"
+
+# Extras are left out of the image-change warning; other persisted npm tools still trigger it.
+run_in -v "$VOL:/home/agent" --network none --entrypoint sh -- -c 'echo old >/home/agent/.agentainer/tools-image-version'
+out=$(run_in -v "$VOL:/home/agent" --network none -e AGENTAINER_TOOLS=persist -- sh -c 'echo STARTED; ls /home/agent/.agentainer/tools/npm/bin' 2>&1)
+assert_contains "image change with only an extra: the extra's link is persisted" "fixture-extra" "$out"
+assert_absent "image change with only an extra: no warning" "$out" STARTED "image changed"
+run_in -v "$VOL:/home/agent" --network none --entrypoint sh -- -c 'ln -s ../lib/node_modules/fixture-npm-tool/cli.js /home/agent/.agentainer/tools/npm/bin/fixture-npm-tool && echo old >/home/agent/.agentainer/tools-image-version'
+out=$(run_in -v "$VOL:/home/agent" --network none -e AGENTAINER_TOOLS=persist -- true 2>&1)
+assert_contains "image change with another npm tool: warns" "image changed" "$out"
+assert_contains "image change with another npm tool: names it" "fixture-npm-tool" "$out"
+assert_absent "image change with another npm tool: leaves the extra out" "$out" "image changed" "fixture-extra"
+run_in -v "$VOL:/home/agent" --network none --entrypoint sh -- -c 'rm -f /home/agent/.agentainer/tools/npm/bin/fixture-npm-tool'
 
 # Two containers on one persist root install at the same time.
 start "$c3" -v "$VOL:/home/agent" -e AGENTAINER_TOOLS=persist || fail "third container"
