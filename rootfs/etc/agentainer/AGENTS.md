@@ -10,7 +10,7 @@ You are running inside an Agentainer container.
 - Credentials may come from environment variables or from agent login files in your home. Never print them, copy them into other files, or commit them.
 - Follow the repository's commit, push and approval rules. Do not treat these environment instructions as permission to commit or push.
 
-Edit this file to add your own instructions. It is `~/.agentainer/AGENTS.md`, and every agent in this container reads it.
+Edit this file to add your own instructions. It is `~/.agentainer/AGENTS.md`. Agentainer links each agent to it when that agent's own user instruction file is missing. If that file already exists, Agentainer leaves it as is, and the agent reads this file only if yours imports or links it.
 
 ## Working rules
 

@@ -21,7 +21,7 @@ Both methods survive container removal and recreation:
 | Named volume | `AGENTAINER_HOME_VOLUME=agentainer-home` | Docker or Podman manages the storage |
 | Bind mount | `AGENTAINER_HOME_VOLUME="$HOME/.config/agentainer/home"` | A directory you can edit and back up on the host |
 
-A bind mount is useful when you want to maintain your own dotfiles from the host. The launcher mounts the directory at `/home/agent`; the host path does not need to match the container path. These are different storage methods, described in the [Docker volume](https://docs.docker.com/engine/storage/volumes/) and [bind-mount](https://docs.docker.com/engine/storage/bind-mounts/) documentation. Podman supports the same `-v SOURCE:DESTINATION` syntax ([Podman run](https://docs.podman.io/en/latest/markdown/podman-run.1.html)).
+A bind mount is useful when you want to maintain your own dotfiles from the host. The launcher mounts the directory at `/home/agent`; the host path does not need to match the container path.
 
 Run the examples from the repository root. They assume `$HOME/code` already exists and use a local image built with `sh scripts/build.sh`:
 
@@ -77,7 +77,7 @@ For the bind mount above:
 | Antigravity | `.gemini/antigravity-cli/settings.json` | `~/.gemini/antigravity-cli/settings.json` |
 | OpenCode | `.config/opencode/opencode.json` and `cli.json` | `~/.config/opencode/opencode.json` and `cli.json` |
 
-The paths and supported settings are documented in [default configuration](defaults.md). Agent configuration files that select plugins, hooks or status-line commands also need those plugins or commands available inside the container. See [optional plugin installation](plugins.md) for each agent's commands. A host-specific command or absolute symlink target does not become available merely because its configuration file is mounted.
+The paths and supported settings are documented in [default configuration](defaults.md). Agent configuration files that select plugins, hooks or status-line commands also need those plugins or commands available inside the container. See [setting up the agents](agents.md) for each agent's settings, skills and status line, and [optional plugins](plugins.md) for install commands. A host-specific command or absolute symlink target does not become available merely because its configuration file is mounted.
 
 With a named volume, open a shell with `bin/agentainer shell` and edit the same container paths. With a bind mount, changes made from either side affect the same files. Restart the affected application when it does not reload a changed setting automatically.
 
@@ -85,7 +85,7 @@ Git identity is personal. Set it in your home `.gitconfig` or supply the runtime
 
 ## Image upgrades and separate test homes
 
-New image defaults are available under `/etc/agentainer/home/` inside the container. Compare them with your own files and apply the changes you want. Do not copy the entire seed directory over an existing home. The shared instructions have separate [version and ownership rules](configuration.md#agentsmd).
+New image defaults are available under `/etc/agentainer/home/` inside the container. Compare them with your own files and apply the changes you want. Do not copy the entire seed directory over an existing home. [Upgrading](running.md#upgrading) lists the files that startup does change.
 
 Mounts are selected when a container is created. Changing `AGENTAINER_HOME_VOLUME` does not change an existing container's mount or migrate files from its old home. `bin/agentainer down` removes the container and keeps its home; a subsequent `up` can select another home ([launcher commands](running.md#the-launcher)).
 
@@ -112,7 +112,7 @@ Rebuild when you want different defaults for new homes or a different bundled to
 - Edit `build/apt-packages.txt` for OS packages. Update image and tool pins in `versions.env`, following the [pinning rules](../AGENTS.md#pins-and-downloads).
 - Build your own tag with `sh scripts/build.sh --tag localhost/my-agentainer:dev` and select it with `AGENTAINER_IMAGE` or `bin/agentainer up --image` ([build script](../scripts/build.sh)).
 
-Rebuilding does not replace existing home files. For user-installed tools that should survive container recreation, use `AGENTAINER_TOOLS=persist` in the runtime env file before creating the container. This applies to the supported user package managers, not OS packages installed with `sudo apt`. See [tools that agents install](configuration.md#tools-that-agents-install).
+Rebuilding does not replace existing home files. To keep user-installed tools across container recreation, see [tools that agents install](configuration.md#tools-that-agents-install).
 
 ## Project dependencies and installed tools
 
@@ -120,4 +120,4 @@ Use a project's dependency files and lockfile for its tests, linters and applica
 
 Project environments such as `.venv` and `node_modules` live under the project directory. Under `/workspace`, their files are on the workspace bind mount, independently of `AGENTAINER_TOOLS`. Recreate them from the lockfile when changing the container architecture or Python/Node runtime; dependencies may contain native binaries ([uv environment portability](https://docs.astral.sh/uv/concepts/projects/layout/#the-project-environment), [npm platform selection](https://docs.npmjs.com/cli/v9/configuring-npm/package-json#cpu)).
 
-Use `AGENTAINER_TOOLS=persist` for the supported user-installed commands you want across projects. It preserves their installation roots on the home volume; it does not record the install commands or reproduce the same tool versions in another home. Keep those choices in your own setup instructions or custom image. Caches and installed environments can be rebuilt; keep the project's dependency declarations and lockfiles in version control.
+Caches and installed environments can be rebuilt; keep the project's dependency declarations and lockfiles in version control. For commands you want across projects, see [tools that agents install](configuration.md#tools-that-agents-install).

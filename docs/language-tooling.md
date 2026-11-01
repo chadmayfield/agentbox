@@ -16,9 +16,7 @@ These are optional user installations. They do not change the image's pins or in
 
 ## Preserve user-installed tools
 
-Set `AGENTAINER_TOOLS=persist` in the container's runtime environment before creating it. This keeps the supported Go and npm installation roots under the persistent home. Changing this setting does not change an existing container's environment. See [tool persistence](configuration.md#tools-that-agents-install) and [container recreation](customization.md#image-upgrades-and-separate-test-homes).
-
-With the image's default `ephemeral` tools mode, user-installed Go and npm commands are lost when the container is replaced. The separate Rust home described below persists on the home volume in either mode.
+With the default `ephemeral` tools mode, Go and npm commands you install are lost when the container is replaced. To keep them, set `AGENTAINER_TOOLS=persist` before you create the container ([tools that agents install](configuration.md#tools-that-agents-install)). The separate Rust home described below stays on the home volume in either mode.
 
 ## Go with gopls
 
@@ -37,7 +35,7 @@ Configure the client to launch `gopls serve`. Its Go environment must match the 
 
 ## Python with Pyright
 
-Install Microsoft's npm package, using the image's writable npm prefix:
+Install Microsoft's npm package, using the image's writable npm prefix ([tools that agents install](configuration.md#tools-that-agents-install)):
 
 ```sh
 npm install --global pyright
@@ -98,10 +96,19 @@ The examples select current upstream releases at installation time. Record `gopl
 
 After an image architecture or runtime change, validate or reinstall persisted tools. `agentainer-tools reset` moves all persisted tool roots aside, including Go, npm, cargo, uv, pipx and the Python user base; the separate `$HOME/.agentainer/rustup` directory is outside that reset. See [customization](customization.md#project-dependencies-and-installed-tools).
 
-The optional integration check installs servers and a TypeScript 6 fallback project in a disposable persistent home, checks actual LSP initialization and document symbols, rejects a fake server and recreates the container with networking disabled:
+The optional integration check runs from the repository root against an existing local image:
 
 ```sh
 python3 tests/host/test-language-tooling.py --image localhost/agentainer:dev
 ```
 
-Run it from this repository root against an existing local image. Use `--runtime docker` for Docker Engine. Installation needs the Go module service, npm and Rust distribution service. The check uses only `cx-*` names, runs one container at a time and removes its containers and volume. It does not build an image, modify a personal home or make model requests. Local checks use Podman on arm64; Docker Engine and amd64 execution are not verified.
+It does the following:
+
+- Installs the servers and a TypeScript 6 fallback project in a disposable persistent home.
+- Checks LSP initialization and document symbols, and rejects a fake server.
+- Recreates the container with networking disabled.
+- Uses only `cx-*` names, runs one container at a time, and removes its containers and volume.
+
+Use `--runtime docker` for Docker Engine. Installation needs network access to the Go module proxy, npm and the Rust distribution server. The check does not build an image, modify a personal home or make model requests.
+
+The manual workflow [`.github/workflows/optional-tooling.yml`](../.github/workflows/optional-tooling.yml) (`workflow_dispatch`) builds the image and runs this check and the [Playwright check](browser-testing.md#verify-execution) with Docker on amd64 and arm64 runners. Not verified: the workflow has no runs yet (`gh run list --workflow optional-tooling.yml` returns none).

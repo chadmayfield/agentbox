@@ -12,9 +12,9 @@ Install Playwright in the project that needs it. Agentainer supplies Node.js and
 
 ## Allow OS dependency installation
 
-An agent can run the project installation, browser download and smoke test below. It cannot install missing OS libraries under the default launcher security settings. Have the user enable sudo for that setup or supply a custom image with the libraries already installed. Browser binaries must match the project's Playwright version; downloading a browser alone does not supply its OS dependencies ([Playwright browser requirements](https://playwright.dev/docs/browsers)).
+An agent can run the project installation, browser download and smoke test below. Playwright's Linux libraries need root, and the launcher blocks sudo by default. Create a container with `--sudo` for that step, or use a custom image that already has the libraries. Downloading a browser does not supply its OS dependencies, and browser binaries must match the project's Playwright version ([Playwright browser requirements](https://playwright.dev/docs/browsers)).
 
-Playwright's Linux libraries need root access. The launcher's default security settings block sudo, so create a container with `--sudo` when installing these libraries. Select an available image as described in [running Agentainer](running.md), then run this from the repository root for a separate browser-testing home:
+Select an available image as described in [running Agentainer](running.md), then run this from the repository root for a separate browser-testing home:
 
 ```sh
 AGENTAINER_HOME_VOLUME=agentainer-browser-home \
@@ -85,6 +85,13 @@ From this repository root, run the optional networked setup check against an exi
 python3 tests/host/test-playwright-setup.py --image localhost/agentainer:dev
 ```
 
-Use `--runtime docker` for Docker Engine. The check installs the Playwright version already locked for [visual tests](../tests/visual/package.json), installs Chromium's libraries and headless shell, runs the smoke test, checks a deliberately wrong assertion, and recreates the container with the same home and workspace volumes. It verifies browser file hashes and runs the test again after reinstalling OS libraries. It creates one container at a time, uses only `cx-*` names and removes its containers and volumes. It does not build an image or mount a personal home. Setup needs npm, Ubuntu and Playwright download access; the smoke test blocks page network requests.
+Use `--runtime docker` for Docker Engine. The check does the following:
 
-Local verification used Podman on arm64 with an existing image. Docker Engine and amd64 execution are not verified.
+- Installs the Playwright version locked for [visual tests](../tests/visual/package.json), then Chromium's libraries and headless shell.
+- Runs the smoke test, and checks that a deliberately wrong assertion fails.
+- Recreates the container with the same home and workspace volumes, checks the browser file hashes, reinstalls the OS libraries and runs the test again.
+- Creates one container at a time, uses only `cx-*` names and removes its containers and volumes. It does not build an image or mount a personal home.
+
+Setup needs network access to npm, Ubuntu and Playwright downloads. The smoke test itself blocks page network requests.
+
+The manual workflow [`.github/workflows/optional-tooling.yml`](../.github/workflows/optional-tooling.yml) (`workflow_dispatch`) builds the image and runs this check and the [language tooling check](language-tooling.md#updates-and-verification) with Docker on amd64 and arm64 runners. Not verified: the workflow has no runs yet (`gh run list --workflow optional-tooling.yml` returns none). See [CONTRIBUTING.md](../CONTRIBUTING.md#ci).

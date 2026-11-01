@@ -1,13 +1,23 @@
 # Optional agent tools and plugins
 
-Run these commands inside Agentainer as the regular container user. Choose the plugins you want for each agent. The image does not install these optional plugins during its build or startup. Its existing built-in agent settings are described in [default configuration](defaults.md).
+Run these commands inside Agentainer as the regular container user. Choose the plugins you want for each agent. The image installs none of them, at build or at startup. Its built-in agent settings are described in [default configuration](defaults.md), and where each agent keeps settings and skills is in [setting up the agents](agents.md).
 
-Keep the same persistent home when recreating the container to retain home-based plugin settings and files. Try plugins with a [separate test home](customization.md#image-upgrades-and-separate-test-homes) first. External dependencies and account connections may need separate setup; a persistent home does not preserve software installed elsewhere in the container.
+Before you install anything from this page:
+
+- None of these tools is tested against the currently pinned agents. [Verification limits](#verification-limits) lists what was checked and when.
+- Try a plugin in a [separate test home](customization.md#image-upgrades-and-separate-test-homes) first. Plugins and hooks change what an agent runs or sees.
+- After installing, inspect your settings, hooks and instruction files for changes, restart the agent, and check that the plugin's tools or hooks actually run. An install success message does not prove the agent loaded it.
+- Keep the same persistent home to keep home-based plugin settings and files. A persistent home does not keep software installed elsewhere in the container, and external dependencies and account connections need their own setup.
+- Do not copy upstream example instructions over your project's or the shared `AGENTS.md`.
 
 ## Contents
 
 - [Recommended starting points](#recommended-starting-points)
 - [Token and context tools](#token-and-context-tools)
+  - [RTK](#rtk)
+  - [context-mode](#context-mode)
+  - [Context7](#context7)
+    - [Neuledge Context: local option](#neuledge-context-local-option)
 - [Claude Code](#claude-code)
 - [Codex](#codex)
 - [OpenCode](#opencode)
@@ -33,7 +43,7 @@ For more visual design guidance, [UI UX Pro Max](https://github.com/nextlevelbui
 
 ## Token and context tools
 
-These tools solve different problems. Start with one in a separate test home, measure the result, and keep the original command output available when checking a failure. Automatic hooks change what agents execute or see; installing a package does not prove that those hooks work with Agentainer's pinned agents.
+These tools solve different problems. Start with one, measure the result, and keep the original command output available when checking a failure.
 
 | Tool | Purpose | Suggested use |
 |---|---|---|
@@ -73,7 +83,7 @@ Review the downloaded installer before executing it. Installing the binary does 
 
 RTK's [agent table](https://github.com/rtk-ai/rtk#supported-ai-tools) describes Codex command rewriting through `updatedInput`, while context-mode's [Codex guide](https://github.com/mksglu/context-mode) describes deny-only `PreToolUse` routing. Those upstream descriptions disagree. Actual rewriting behavior with the pinned Codex is not verified.
 
-Those integration commands have not been run against Agentainer's pinned agents. In particular, do not infer OpenCode V2 plugin compatibility from an upstream minimum version for older OpenCode. Inspect changes to existing hooks, settings and instructions before using the integration. Keep Agentainer's shared instructions and project `AGENTS.md` files. After restarting the chosen agent, check actual command interception and compare the result with the original output; `rtk gain` reports RTK's savings estimates. See the [installation guide](https://www.rtk-ai.app/docs/getting-started/installation/) for removal.
+An upstream minimum version for older OpenCode does not show compatibility with OpenCode v2. `rtk gain` reports RTK's savings estimates. See the [installation guide](https://www.rtk-ai.app/docs/getting-started/installation/) for removal.
 
 ### context-mode
 
@@ -96,9 +106,7 @@ Merge this server into the existing `mcpServers` object in `~/.agentainer/mcp.js
 }
 ```
 
-Stop agents that write their config files, then run `agentainer-mcp sync` as described in [MCP synchronization](configuration.md#mcp-servers). MCP-only registration exposes tools; it does not install routing hooks or establish session-continuity behavior. Use the [upstream installation guide](https://github.com/mksglu/context-mode) for the chosen client's full plugin setup, restart requirements and diagnostics. Do not copy its example instructions over an existing project or shared `AGENTS.md`.
-
-Codex's upstream setup includes hook feature flags and hook trust, and the Antigravity CLI setup differs from the Antigravity desktop IDE. These integrations, their permission behavior and their interaction with RTK are not verified in Agentainer. Confirm the tools are callable and the chosen hooks actually fire before relying on them. The existing OpenCode discovery limitations below still apply. Uninstalling the npm package alone does not describe how to remove client-specific plugin configuration; use the matching upstream removal instructions.
+Stop agents that write their config files, then run `agentainer-mcp sync` as described in [MCP synchronization](configuration.md#mcp-servers). MCP-only registration exposes tools; it does not install routing hooks. Use the [upstream installation guide](https://github.com/mksglu/context-mode) for each client's full plugin setup, restart steps, diagnostics and removal. Codex's upstream setup includes hook feature flags and hook trust, and the Antigravity CLI setup differs from the Antigravity desktop IDE.
 
 ### Context7
 
@@ -123,9 +131,9 @@ The [setup guide](https://github.com/upstash/context7#installation) documents th
 }
 ```
 
-This endpoint and bearer-header format come from the [upstream client guide](https://github.com/upstash/context7/blob/master/docs/resources/all-clients.mdx). Follow [MCP synchronization](configuration.md#mcp-servers) before running `agentainer-mcp sync`. Antigravity does not receive headers containing environment references through that sync; configure authentication for it using its native client instructions. OpenCode discovery remains not verified. Do not assume that a shared entry establishes authentication in every agent.
+This endpoint and bearer-header format come from the [upstream client guide](https://github.com/upstash/context7/blob/master/docs/resources/all-clients.mdx). Then run `agentainer-mcp sync` ([MCP synchronization](configuration.md#mcp-servers)). The sync does not give Antigravity headers that contain `${NAME}`. For Antigravity, add the server by hand under a name that `mcp.json` does not use, because the next sync rewrites a server it manages ([agents](agents.md#mcp-servers-and-authentication)).
 
-After restarting the client, verify that `resolve-library-id` and `query-docs` are available and complete a public-library lookup. Request documentation for the project's actual version and check the original source when accuracy matters. Authenticated use, coverage of particular libraries and cost effects have not been verified here. Remove generated setup with the matching `ctx7` CLI's `remove` command, or remove the manually managed server entry and re-sync. See the upstream [CLI guide](https://context7.com/docs/clients/cli) for the selected version's options.
+After restarting the client, check that `resolve-library-id` and `query-docs` are available and complete a public-library lookup. Request documentation for the project's actual version and check the original source when accuracy matters. Remove generated setup with the matching `ctx7` CLI's `remove` command, or remove the server entry and sync again. See the upstream [CLI guide](https://context7.com/docs/clients/cli) for the selected version's options.
 
 #### Neuledge Context: local option
 
@@ -157,7 +165,7 @@ For a collection limited to those installed project docs, merge this entry into 
 
 The upstream [`serve` reference](https://github.com/neuledge/context/blob/main/packages/context/README.md#context-serve) documents stdio transport and `--libs`, which restricts available packages and hides registry search/download tools. Installed documentation queries run locally; installation, registry discovery and remote-source imports require network access. The agent still sends retrieved content to its configured model.
 
-Follow [MCP synchronization](configuration.md#mcp-servers), preserving other entries and stopping agents that write their configuration before syncing. Restart the chosen agent and verify a `get_docs` lookup. Installation, offline behavior and compatibility with Agentainer's pinned agents are not verified. Nothing here installs the package or changes startup defaults.
+Then run `agentainer-mcp sync` ([MCP synchronization](configuration.md#mcp-servers)), restart the agent and check a `get_docs` lookup.
 
 ## Claude Code
 
@@ -182,26 +190,13 @@ If `claude-plugins-official` is missing, add it:
 claude plugin marketplace add anthropics/claude-plugins-official
 ```
 
-Choose either installation independently. User scope applies to your home across projects:
+Install each plugin you choose with its own command. User scope applies to your home across projects. The Superpowers command comes from the [project's Claude installation guide](https://github.com/obra/superpowers#claude-code):
 
 ```sh
-claude plugin install code-simplifier@claude-plugins-official --scope user
-```
-
-```sh
-claude plugin install frontend-design@claude-plugins-official --scope user
-```
-
-Choose Superpowers if you want its broader development workflow. The [project's Claude installation guide](https://github.com/obra/superpowers#claude-code) lists the official marketplace installation:
-
-```sh
-claude plugin install superpowers@claude-plugins-official --scope user
-```
-
-Install security guidance separately if you want its hooks and reviews:
-
-```sh
-claude plugin install security-guidance@claude-plugins-official --scope user
+claude plugin install code-simplifier@claude-plugins-official --scope user    # simplification
+claude plugin install frontend-design@claude-plugins-official --scope user    # web interfaces
+claude plugin install superpowers@claude-plugins-official --scope user        # broader development workflow
+claude plugin install security-guidance@claude-plugins-official --scope user  # security hooks and reviews
 ```
 
 List installed plugins, then start a new Claude session to load them:
@@ -219,7 +214,7 @@ claude plugin uninstall code-simplifier@claude-plugins-official --scope user
 
 See [Claude's installation and scope documentation](https://code.claude.com/docs/en/discover-plugins). Avoid project scope when the choice should apply only to you.
 
-The bundled Claude installer rewrote the seeded permission mode from `manual` to `default` during the installation check. It retained the other seeded display and shared-instruction settings. Inspect your settings after installation; plugin management can normalize existing settings as well as add plugin entries. Actual tool-approval behavior was not tested.
+In the 2026-10-21 check, the Claude installer rewrote the seeded permission mode from `manual` to `default` and kept the other seeded settings. Inspect `~/.claude/settings.json` after installing a plugin.
 
 ## Codex
 
@@ -258,7 +253,7 @@ Agentainer does not enable these recommendations automatically. See the [officia
 
 ## OpenCode
 
-Runtime discovery is not verified with the pinned OpenCode. In a disposable-container check, `plugin add` wrote the expected `plugins` entry and `plugin remove` removed it, but `plugin list` and the native plugin API returned empty lists. The skill API also returned an empty list after copying the four recommended skills and their shared references. An installation success message alone does not prove that OpenCode loaded them.
+Not verified: whether OpenCode loads installed plugins and skills. In the 2026-10-21 check, `plugin add` wrote the expected `plugins` entry and `plugin remove` removed it, but `plugin list` and the native plugin API returned empty lists, and the skill API returned an empty list after the four recommended skills were copied in.
 
 List installed package plugins:
 
@@ -335,7 +330,7 @@ Choose each pack independently. See [Antigravity's plugin documentation](https:/
 
 ## Verification limits
 
-The following checks ran on 2026-10-21 with the agent versions pinned in [versions.env](../versions.env), using disposable homes in the existing local arm64 image. No personal home or credentials were mounted, and no model requests were sent.
+These checks ran on 2026-10-21 on arm64 with disposable homes and the agent versions pinned at that time. No credentials were mounted and no model requests were sent. No public result artifact records them, and they have not been repeated with the current pins in [versions.env](../versions.env), so treat them as not verified.
 
 | Agent or package | Observed result |
 |---|---|
@@ -347,6 +342,6 @@ The following checks ran on 2026-10-21 with the agent versions pinned in [versio
 
 The pack checks used Superpowers revision [`b739a8a`](https://github.com/obra/superpowers/tree/b739a8af570e10a95898f2bdf6cec97467fa6c12) and agent-skills revision [`aeac41d`](https://github.com/addyosmani/agent-skills/tree/aeac41d4d005999432bb7312f7ff06383a91d59d). The UI UX Pro Max check used the npm CLI release `2.15.0`. That installer also included auxiliary design skills; inspect its generated files before adding them to a project.
 
-Native command syntax was checked against the bundled CLIs' help. Recommended package names, sources and setup steps come from the linked upstream guides and skill files. Actual coding workflows, account connections, model costs, hook execution and approval delivery remain not verified. Installation checks do not establish plugin effectiveness or constitute a full security audit. These instructions do not install or enable anything until you run the installation commands or apply the plugin configuration.
+Verified: the `claude plugin`, `codex plugin`, `opencode plugin` and `agy plugin` subcommands used on this page exist in the pinned CLIs (`--help` in the current image). Package names, sources and setup steps come from the linked upstream guides. Not verified: coding workflows, account connections, model costs, hook execution, approval prompts and plugin effectiveness. None of these checks is a security audit.
 
-The RTK, context-mode, Context7 and Neuledge Context examples were checked against upstream documentation on 2026-10-22. Their installers, authentication, agent hooks and savings were not tested in Agentainer. These examples are not additions to the image or its startup defaults.
+The RTK, context-mode, Context7 and Neuledge Context examples were checked against upstream documentation on 2026-10-22. Not verified in Agentainer: their installers, authentication, agent hooks, offline behavior and savings.
