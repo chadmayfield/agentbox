@@ -219,6 +219,11 @@ node)
 	tar --no-same-owner --strip-components=1 -xJf node.txz -C /opt/node
 	# Headers and docs are not needed to run node; keep LICENSE.
 	rm -rf /opt/node/include /opt/node/share /opt/node/README.md /opt/node/CHANGELOG.md
+	# npm's builtin config file, path/to/npm/itself/npmrc
+	# (https://docs.npmjs.com/cli/v11/configuring-npm/npmrc, "Built-in config file").
+	# sudo drops NPM_CONFIG_PREFIX, so root's global installs would go to /opt/node; this
+	# sends them to /usr/local. The agent user's NPM_CONFIG_PREFIX overrides it.
+	echo "prefix=/usr/local" >/opt/node/lib/node_modules/npm/npmrc
 	chown -R root:root /opt/node
 	/opt/node/bin/node --version >/dev/null
 	;;

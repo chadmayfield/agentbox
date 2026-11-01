@@ -488,6 +488,7 @@ class WriteTests(unittest.TestCase):
                 self.assertEqual(bv.main(["--file", self.path], resolvers=[lambda u=update: u]), 1)
                 self.assertEqual(self.read(), "A=1\n")
 
+    @unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
     def test_node_with_a_bad_signature_leaves_file_untouched(self):
         shasums = ("%s  node-v26.99.0-linux-x64.tar.xz\n%s  node-v26.99.0-linux-arm64.tar.xz\n"
                    % ("b" * 64, "a" * 64)).encode()

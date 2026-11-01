@@ -29,6 +29,7 @@ jq
 less
 libatomic1
 libimage-exiftool-perl
+libssl-dev
 make
 nano
 netcat-openbsd

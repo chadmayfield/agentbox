@@ -34,4 +34,6 @@ assert_eq "ansible-galaxy installs collections" "agentainer.fixture 1.0.0" "$(ru
 		python3 -c "import json, sys; print(*(n + \" \" + c[\"version\"] for p in json.load(sys.stdin).values() for n, c in p.items()))"
 ' 2>&1)"
 
+assert_eq "openssl headers installed" "yes" "$(run_in -- sh -c 'test -f /usr/include/openssl/ssl.h && echo yes')"
+
 finish

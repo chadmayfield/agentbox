@@ -132,7 +132,9 @@ ARG TARGETARCH
 ARG NODE_VERSION
 ARG NODE_SHA256_AMD64
 ARG NODE_SHA256_ARM64
-# node links libatomic.so.1, which the final image gets from apt-packages.txt.
+# node links libatomic.so.1, which the final image gets from apt-packages.txt. This install
+# comes from the live archive only for the node --version check in this stage and is not
+# copied into the image.
 RUN apt-get update \
 	&& DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libatomic1 \
 	&& rm -rf /var/lib/apt/lists/*

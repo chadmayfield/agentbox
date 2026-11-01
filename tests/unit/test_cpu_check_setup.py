@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class CpuCheckSetupTests(unittest.TestCase):
     def setup_check(self, failure=""):
         workflow = (ROOT / ".github/workflows/build.yml").read_text()
-        step = workflow.split("      - name: Agents on a CPU without AVX2\n", 1)[1]
+        step = workflow.split("      - name: Agents and Node.js on a CPU without AVX2\n", 1)[1]
         script = textwrap.dedent(step.split("        run: |\n", 1)[1]
                                  .split("      - name:", 1)[0])
         with tempfile.TemporaryDirectory() as directory:

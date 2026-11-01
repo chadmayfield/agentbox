@@ -189,7 +189,7 @@ jobs:
           chmod 755 "$(dirname "$SSH_AUTH_SOCK")"
           docker run --rm --user "$(id -u):$(id -g)" --entrypoint ssh-add \
             -v "$SSH_AUTH_SOCK:/run/ssh-agent.sock" -e SSH_AUTH_SOCK=/run/ssh-agent.sock "$IMAGE" -l | grep -q ED25519
-      - name: Agents on a CPU without AVX2
+      - name: Agents and Node.js on a CPU without AVX2
         if: matrix.arch == 'amd64'
         shell: bash  # -o pipefail: a failing agent must fail the step through tee
         run: |
@@ -210,15 +210,16 @@ jobs:
             if qemu-x86_64 -cpu SandyBridge ./avx2 2>/dev/null; then echo "control: AVX2 ran on SandyBridge" >&2; exit 1; fi
             qemu-x86_64 -cpu Haswell ./avx2 || { echo "control: AVX2 failed on Haswell" >&2; exit 1; }
             failed=0
-            echo "| Agent | --version on SandyBridge (no AVX2) |"
+            echo "| Command | --version on SandyBridge (no AVX2) |"
             echo "|---|---|"
-            for c in claude codex agy opencode; do
+            for c in claude codex agy opencode node; do
               bin=$(readlink -f "$(command -v "$c")")
               if out=$(qemu-x86_64 -cpu SandyBridge "$bin" --version 2>&1 </dev/null); then r="runs: $(printf "%s" "$out" | head -1)"
               else r="fails (exit $?): $(printf "%s" "$out" | tail -1)"; failed=1; fi
               echo "| $c | $r |"
             done
-            # The README says every agent starts without AVX2; a bump that breaks it fails here.
+            # The README says every agent starts without AVX2, and Node.js is the runtime
+            # for npm tools. A bump that breaks either fails here.
             exit "$failed"' | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Secret scan (blocks) and vulnerability scan (report only)
         shell: bash

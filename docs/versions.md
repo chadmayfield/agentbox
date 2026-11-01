@@ -11,7 +11,7 @@
 
 [`versions.env`](../versions.env) pins every input of the image: the base image digest, the apt snapshot date, each agent and tool version, and the checksum of every download. The build checks each download against it. The one exception is the Rust toolchain: `rustup-init` downloads the components and checks each against the hashes in Rust's own channel manifest.
 
-Node.js is the official Linux tarball from nodejs.org, installed in `/opt/node` with `node`, `npm` and `npx` linked into `/usr/local/bin`. `versions.env` pins `NODE_VERSION` and the two Linux checksums (`NODE_SHA256_AMD64`, `NODE_SHA256_ARM64`), and the scheduled update follows the 26.x line. The image removes the `include` and `share` directories from the install.
+Node.js is the official Linux tarball from nodejs.org, installed in `/opt/node` with `node`, `npm` and `npx` linked into `/usr/local/bin`. `versions.env` pins `NODE_VERSION` and the two Linux checksums (`NODE_SHA256_AMD64`, `NODE_SHA256_ARM64`), and the scheduled update follows the 26.x line. The image removes `include/`, `share/`, `README.md` and `CHANGELOG.md` from the install.
 
 Claude Code is the native binary from Anthropic's release host, the file Anthropic's native installer downloads. The scheduled update checks the release's `manifest.json` against Anthropic's GPG signature before it pins the binary's SHA-256 ([binary integrity](https://code.claude.com/docs/en/setup#binary-integrity-and-code-signing)).
 

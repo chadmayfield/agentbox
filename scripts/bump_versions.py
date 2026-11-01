@@ -465,10 +465,9 @@ def parse_claude_manifest(doc, ver):
 def verify_signature(data, sig, key, fingerprints):
     """Raise LookupFailed unless sig is a valid signature of data by a key in the set fingerprints.
 
-    fingerprints is one fingerprint or a tuple of them. The key file comes from the same host
-    as the data, so its primary keys must be exactly that set, and gpg's status output must
-    name one of them as the signer. gpg --verify alone accepts a signature by any key in the
-    keyring.
+    fingerprints is one fingerprint or a tuple of them. The key file must hold exactly that set
+    of primary keys, and gpg's status output must name one of them as the signer. gpg --verify
+    alone accepts a signature by any key in the keyring.
     """
     wanted = frozenset([fingerprints] if isinstance(fingerprints, str) else fingerprints)
     with tempfile.TemporaryDirectory() as home:
