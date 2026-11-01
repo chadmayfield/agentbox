@@ -619,6 +619,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STABLE_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 NPM_NAME = re.compile(r"(?:@([A-Za-z0-9._~-]+)/)?([A-Za-z0-9._~-]+)")
 NPM_VERSION = re.compile(r"[0-9A-Za-z.+-]+")
+# An npm version as node-semver parses it: MAJOR.MINOR.PATCH, an optional -prerelease and an
+# optional +build (https://docs.npmjs.com/about-semantic-versioning, https://semver.org/#spec-item-9).
+NPM_SEMVER = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?")
 REGISTRY_TIME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]+)?Z")
 
 
@@ -678,11 +681,24 @@ def parse_registry_time(value):
     return when + datetime.timedelta(seconds=float("0" + (m.group(2) or "")))
 
 
+def npm_version_key(value):
+    """Sort key for an npm version: (major, minor, patch, 0 for a prerelease or 1 for a release).
+
+    A prerelease sorts below the release with the same major, minor and patch, as in
+    https://semver.org/#spec-item-11. Prerelease identifiers and build metadata are not compared,
+    because the extras resolver only picks releases. Raises ValueError for any other string.
+    """
+    m = NPM_SEMVER.fullmatch(value) if isinstance(value, str) else None
+    if not m:
+        raise ValueError("invalid npm version %r" % (value,))
+    return tuple(int(n) for n in m.group(1, 2, 3)) + (int(m.group(4) is None),)
+
+
 def pick_version(packument, now):
     """Newest stable, non-deprecated version up to dist-tags.latest published at least EXTRA_MIN_AGE_DAYS before now."""
     if not isinstance(packument, dict) or not isinstance(packument.get("versions"), dict):
         raise LookupFailed("packument is not an object with versions")
-    latest = version_key(packument["dist-tags"]["latest"])
+    latest = npm_version_key(packument["dist-tags"]["latest"])
     times = packument.get("time")
     if not isinstance(times, dict) or not times:
         raise LookupFailed("packument has no time object")
@@ -692,7 +708,7 @@ def pick_version(packument, now):
     for ver, meta in packument["versions"].items():
         if not STABLE_VERSION.fullmatch(ver) or (isinstance(meta, dict) and meta.get("deprecated")):
             continue
-        if version_key(ver) > latest:
+        if npm_version_key(ver) > latest:
             continue
         candidates += 1
         try:
@@ -706,7 +722,7 @@ def pick_version(packument, now):
         raise LookupFailed("packument time has no valid entry for any stable version")
     if not found:
         raise NothingNewer("no stable version published at least %d days ago" % EXTRA_MIN_AGE_DAYS)
-    return max(found, key=version_key)
+    return max(found, key=npm_version_key)
 
 
 def lock_entry_name(path, entry):
@@ -872,8 +888,8 @@ def extra_update(base, pin, name, extra, now):
         print("bump_versions: extras %s: %s; skipped" % (extra, what), file=sys.stderr)
         return None
     ver = pick_version(fetch_json(NPM_REGISTRY + name), now)
-    if version_key(ver) <= version_key(pin):
-        if version_key(ver) < version_key(pin):
+    if npm_version_key(ver) <= npm_version_key(pin):
+        if npm_version_key(ver) < npm_version_key(pin):
             print("bump_versions: extras %s: registry offers %s, older than %s; pin unchanged" % (extra, ver, pin),
                   file=sys.stderr)
         return None
@@ -1086,10 +1102,12 @@ def bump(args, resolvers):
             print("bump_versions: refusing to write %s" % why, file=sys.stderr)
         return 1
     old = values(lines)
+    npm_keys = {key for key, _, _ in EXTRAS}
     for key, value in updates.items():
         if key.endswith("_VERSION") and key in old and old[key] != value:
+            order = npm_version_key if key in npm_keys else version_key
             try:
-                if version_key(strip_v(value)) < version_key(strip_v(old[key])):
+                if order(strip_v(value)) < order(strip_v(old[key])):
                     raise ValueError("resolver would downgrade %s" % key)
             except ValueError as error:
                 print("bump_versions: %s; pins unchanged" % error, file=sys.stderr)

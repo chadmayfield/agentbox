@@ -549,6 +549,31 @@ class PickVersionTests(unittest.TestCase):
         del doc["time"]["1.1.0"]
         self.assertEqual(bv.pick_version(doc, NOW), "1.0.0")
 
+    def test_prerelease_latest_bounds_the_pick_below_its_release(self):
+        # npm accepts these prerelease forms; agentainer's own release_version.version_key rejects
+        # the first two (dev.N without a date, and a numeric identifier with a leading zero).
+        for latest in ("1.0.0-dev.5", "1.0.0-beta.01", "1.0.0-rc.1", "1.0.0-alpha+build.7"):
+            with self.subTest(latest=latest):
+                doc = self.packument({"0.9.0": (30, {}), "0.10.0": (20, {}), "1.0.0": (10, {}),
+                                      latest: (15, {}), "1.0.0-dev.4": (25, {})}, latest=latest)
+                # 1.0.0 is above a 1.0.0 prerelease, and 0.10.0 sorts above 0.9.0.
+                self.assertEqual(bv.pick_version(doc, NOW), "0.10.0")
+
+    def test_numeric_order_and_stable_latest_with_prereleases_in_versions(self):
+        doc = self.packument({"1.9.0": (30, {}), "1.10.0": (20, {}), "2.0.0-dev.5": (15, {}),
+                              "2.0.0-rc.1": (10, {}), "1.10.1-beta.02": (9, {})}, latest="1.10.0")
+        self.assertEqual(bv.pick_version(doc, NOW), "1.10.0")
+
+    def test_npm_version_key(self):
+        key = bv.npm_version_key
+        self.assertGreater(key("1.10.0"), key("1.9.0"))
+        self.assertGreater(key("2.0.0"), key("2.0.0-dev.5"))
+        self.assertGreater(key("2.0.0-rc.1"), key("1.99.99"))
+        self.assertEqual(key("1.2.3+build.1"), key("1.2.3"))
+        for bad in ("1.2", "v1.2.3", "1.2.3-", "x", ""):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                key(bad)
+
 
 class NewInstallScriptsTests(unittest.TestCase):
     def test_reports_only_packages_newly_flagged(self):
@@ -929,6 +954,29 @@ class ExtrasTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.npm_calls, [])
+
+    def test_prerelease_pin_is_replaced_by_its_release(self):
+        self.write("versions.env", "A=1\nKANDEV_VERSION=1.1.0-dev.5\nOPENCHAMBER_VERSION=2.0.0\nREA_VERSION=3.0.0\n")
+        self.latest = {"kandev": "1.1.0", "@openchamber/web": "2.0.0", "rea-agents": "3.0.0"}
+        rc, out, err = self.run_main(["--only", "r_extras"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("KANDEV_VERSION: 1.1.0-dev.5 -> 1.1.0", out)
+        self.assertIn("KANDEV_VERSION=1.1.0\n", self.read("versions.env"))
+
+    def test_downgrade_guard_orders_extras_pins_numerically(self):
+        self.write("versions.env", "KANDEV_VERSION=1.10.0\n")
+        rc, out, err = self.run_main(resolvers=[lambda: {"KANDEV_VERSION": "1.9.0"}])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("resolver would downgrade KANDEV_VERSION", err)
+        self.assertEqual(self.read("versions.env"), "KANDEV_VERSION=1.10.0\n")
+        self.write("versions.env", "KANDEV_VERSION=2.0.0-dev.5\n")
+        rc, out, err = self.run_main(resolvers=[lambda: {"KANDEV_VERSION": "1.99.0"}])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("resolver would downgrade KANDEV_VERSION", err)
+        self.write("versions.env", "KANDEV_VERSION=2.0.0-dev.5\n")
+        rc, out, err = self.run_main(resolvers=[lambda: {"KANDEV_VERSION": "2.0.0"}])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.read("versions.env"), "KANDEV_VERSION=2.0.0\n")
 
     def test_missing_catalog_or_pin_skips_that_extra(self):
         shutil.rmtree(os.path.join(self.dir, CATALOG, "openchamber"))

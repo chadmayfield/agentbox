@@ -44,8 +44,10 @@ runs:
         fi
         name='[A-Za-z0-9_][A-Za-z0-9._-]*'
         allowed="^(versions\.env|deploy/kubernetes/$name/deployment\.yaml|rootfs/usr/local/share/agentainer/extras/$name/package(-lock)?\.json)\$"
+        lockfile="^rootfs/usr/local/share/agentainer/extras/$name/package-lock\.json\$"
         git apply --numstat -z "$PATCH_FILE" >"$RUNNER_TEMP/numstat"
         count=0
+        extras=0
         # -z records: added<TAB>deleted<TAB>path<NUL>. A binary file shows "-" for both counts.
         # Split on the first two tabs only, so tabs at the ends of a path stay part of it.
         while IFS= read -r -d '' rec; do
@@ -61,6 +63,9 @@ runs:
           fi
           if ! [[ $path =~ $allowed ]]; then
             refuse "it changes $path, which the resolver never writes"
+          fi
+          if [[ $path =~ $lockfile ]]; then
+            extras=1
           fi
           count=$((count + 1))
         done <"$RUNNER_TEMP/numstat"
@@ -89,6 +94,16 @@ runs:
         fence='```'
         while grep -qF -- "$fence" "$CHANGES_FILE"; do fence="${fence}\`"; done
         { echo "Automated pin update. Review and merge by hand."; echo; cat "$RUNNER_TEMP/major.md"; echo "$fence"; cat "$CHANGES_FILE"; echo "$fence"; } >"$RUNNER_TEMP/body.md"
+        # tests/host/test-extras-live.sh needs registry.npmjs.org, so CI does not run it.
+        if [ "$extras" -eq 1 ]; then
+          {
+            echo
+            echo "Before merging:"
+            echo
+            # shellcheck disable=SC2016 # the backticks are Markdown code spans
+            echo '- [ ] Build this branch with `scripts/build.sh` and run `IMAGE=localhost/agentainer:dev sh tests/host/test-extras-live.sh` on amd64 and on arm64. It installs every extra in the catalog from the npm registry with `agentainer-extras`, which runs the check of each entry, then runs each installed command.'
+          } >>"$RUNNER_TEMP/body.md"
+        fi
         gh pr create --base develop --head "$b" --title "Version bump $(date -u +%Y-%m-%d)" --body-file "$RUNNER_TEMP/body.md"
         if [ -z "$APP_SLUG" ]; then
           echo "::notice::Opened with GITHUB_TOKEN: approve the CI run on the pull request with \"Approve workflows to run\"."

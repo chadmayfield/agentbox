@@ -369,6 +369,27 @@ class BumpPrActionTests(unittest.TestCase):
         self.assertIn("X_VERSION: 1.0.0 -> 1.1.0", (d / "body.md").read_text())
         self.assertIn("--base develop", (d / "gh-args").read_text())
 
+    def test_extras_lockfile_change_adds_the_live_test_checklist(self):
+        def mutate(seed):
+            (seed / EXTRAS / "kandev/package.json").write_text('{"v": 2}\n')
+            (seed / EXTRAS / "kandev/package-lock.json").write_text('{"v": 2}\n')
+        result, _, d = self.run_action(mutate, changes="KANDEV_VERSION: 1.0.0 -> 1.1.0\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        body = (d / "body.md").read_text()
+        self.assertRegex(body, r"(?m)^- \[ \] .*`IMAGE=localhost/agentainer:dev sh tests/host/test-extras-live\.sh`"
+                               r".*amd64 and on arm64")
+
+    def test_versions_env_only_change_has_no_checklist(self):
+        def mutate(seed):
+            (seed / "versions.env").write_text("X_VERSION=1.1.0\n")
+        result, _, d = self.run_action(mutate)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        body = (d / "body.md").read_text()
+        # The resolver output proves the body was written.
+        self.assertIn("X_VERSION: 1.0.0 -> 1.1.0", body)
+        self.assertNotIn("test-extras-live", body)
+        self.assertNotIn("- [ ]", body)
+
     def assert_refused(self, mutate, needle):
         result, branches, d = self.run_action(mutate)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
