@@ -33,6 +33,20 @@ assert_absent "apt nodejs and npm are not installed" \
 	DPKG_CHECK_RAN "nodejs installed" "nodejs half-" "nodejs unpacked" "nodejs config-files" "nodejs triggers" "npm installed" "npm half-" "npm unpacked" "npm config-files" "npm triggers"
 assert_eq "no apt node binary" "none" "$(run_in -- sh -c 'ls /usr/bin/node 2>/dev/null || echo none')"
 assert_eq "npm update notifier is off" "false" "$(run_in -- npm config get update-notifier)"
+assert_contains "aws version" "aws-cli/$AWSCLI_VERSION " "$(run_in -- aws --version)"
+# shellcheck disable=SC2016 # expands in the container
+assert_eq "aws is the official installer's layout" "/usr/local/aws-cli/v2/$AWSCLI_VERSION/dist/aws" \
+	"$(run_in -- sh -c 'readlink -f "$(command -v aws)"')"
+# shellcheck disable=SC2016 # expands in the container
+assert_eq "aws_completer is installed" "/usr/local/aws-cli/v2/$AWSCLI_VERSION/dist/aws_completer" \
+	"$(run_in -- sh -c 'readlink -f "$(command -v aws_completer)"')"
+# aws help renders its pages with groff (AWS install guide: "The AWS CLI uses glibc, groff,
+# and less"). The sed removes groff's bold, as ANSI SGR codes or backspace overstrike,
+# before the heading is matched.
+# shellcheck disable=SC2016 # expands in the container
+assert_eq "aws help renders offline" "rc=0 DESCRIPTION" \
+	"$(run_in --network none -- sh -c 'out=$(aws s3 help 2>&1 </dev/null); rc=$?; printf "%s\n" "$out" | sed -e "s/$(printf "\033")\[[0-9;]*m//g" -e "s/.$(printf "\b")//g" | grep -qx DESCRIPTION && h=DESCRIPTION; echo "rc=$rc ${h:-}"')"
+assert_eq "no AWS configuration is seeded" "none" "$(run_in -- sh -c 'ls -d ~/.aws /etc/agentainer/seed/.aws 2>/dev/null || echo none')"
 assert_eq "no Node headers or docs shipped" "none" "$(run_in -- sh -c 'ls -d /opt/node/include /opt/node/share /opt/node/README.md /opt/node/CHANGELOG.md 2>/dev/null || echo none')"
 # find prints END only when it exits 0, so a missing or unreadable path fails these checks
 # with find's error message in the output instead of passing on an empty result.

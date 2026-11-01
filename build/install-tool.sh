@@ -100,6 +100,42 @@ normalize_rust_components() {
 	rm -f "$tmp"
 }
 
+# extract_zip ZIP DIR: extracts ZIP into DIR with each entry's Unix permission bits, minus
+# group and other write and the setuid, setgid and sticky bits. The fetch stage has python3
+# but no unzip, and Python's zipfile does not restore permissions itself
+# (https://docs.python.org/3/library/zipfile.html#zipfile.ZipFile.extract). Every entry is
+# checked before anything is written: an entry that is not a regular file or directory,
+# such as a symlink, or whose name is absolute or has a ".." segment stops the extraction.
+# Directory modes are set last, deepest first, so a read-only directory entry cannot block
+# the files extracted into it.
+extract_zip() {
+	python3 - "$1" "$2" <<'EOF'
+import os
+import stat
+import sys
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1]) as z:
+    entries = z.infolist()
+    for info in entries:
+        mode = info.external_attr >> 16
+        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            sys.exit("install-tool.sh: %s in %s is not a regular file or directory" % (info.filename, sys.argv[1]))
+        if info.filename.startswith("/") or ".." in info.filename.split("/"):
+            sys.exit("install-tool.sh: %s in %s leaves the target directory" % (info.filename, sys.argv[1]))
+    dirs = []
+    for info in entries:
+        mode = stat.S_IMODE(info.external_attr >> 16) & 0o755
+        path = z.extract(info, sys.argv[2])
+        if info.is_dir():
+            dirs.append((path, mode))
+        else:
+            os.chmod(path, mode)
+    for path, mode in sorted(dirs, key=lambda d: d[0].count(os.sep), reverse=True):
+        os.chmod(path, mode)
+EOF
+}
+
 W=$(mktemp -d)
 cd "$W"
 
@@ -183,6 +219,19 @@ helm)
 	tar -xzf helm.tgz "linux-${TARGETARCH}/helm"
 	install -m 0755 "linux-${TARGETARCH}/helm" /usr/local/bin/helm
 	;;
+awscli)
+	# The AWS CLI v2 installer zip for one version, and AWS's own installer script inside it
+	# (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-version.html). The
+	# pinned SHA-256 was computed after the zip's PGP signature was verified
+	# (scripts/bump_versions.py, r_awscli). --install-dir and --bin-dir are the installer's
+	# defaults, written out (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
+	sh $F "https://awscli.amazonaws.com/awscli-exe-linux-${TRIPLE}-${AWSCLI_VERSION}.zip" sha256 "$(pin AWSCLI_SHA256)" awscli.zip
+	extract_zip awscli.zip .
+	./aws/install --install-dir /usr/local/aws-cli --bin-dir /usr/local/bin
+	chown -R root:root /usr/local/aws-cli
+	test -x "/usr/local/aws-cli/v2/${AWSCLI_VERSION}/dist/aws"
+	/usr/local/bin/aws --version >/dev/null
+	;;
 claude)
 	# The native Claude Code binary from Anthropic's release host, the file the native
 	# installer downloads (https://claude.ai/install.sh). The pinned SHA-256 comes from
@@ -247,6 +296,11 @@ opencode)
 normalize-rust-components)
 	shift
 	normalize_rust_components "$@"
+	;;
+extract-zip)
+	# Runs the extraction alone, for tests: install-tool.sh extract-zip ZIP DIR
+	shift
+	extract_zip "$@"
 	;;
 check-rust-manifest)
 	# Runs the check alone, for tests: install-tool.sh check-rust-manifest PINNED SHA256 USED UPDATE_HASH

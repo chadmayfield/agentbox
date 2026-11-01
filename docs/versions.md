@@ -11,6 +11,7 @@ This page covers what the image pins, how pins are updated, which release tag to
 - [Verifying a release before use](#verifying-a-release-before-use)
 - [Upstream publisher verification](#upstream-publisher-verification)
   - [Node.js release keyring](#nodejs-release-keyring)
+  - [AWS CLI signing key](#aws-cli-signing-key)
 - [Optional extras](#optional-extras)
   - [npm registry keys](#npm-registry-keys)
 
@@ -137,6 +138,7 @@ The updater requires `gh`, `cosign` and GnuPG in addition to Python. The schedul
 | Codex package | Sigstore bundle for the whole package from `openai/codex`, workflow `rust-release.yml` at the selected release tag. |
 | Claude Code | GPG-signed release manifest with the pinned Anthropic key fingerprint. |
 | Node.js | GPG-signed `SHASUMS256.txt` by one of the release keys in `scripts/keys/nodejs-release-keys.asc`. |
+| AWS CLI | GPG signature (`<zip>.sig`) on each installer zip, by the AWS CLI Team key in `scripts/keys/aws-cli-public-key.asc` with the fingerprint pinned in the updater. AWS publishes no checksums, so the updater computes the SHA-256 pins from the verified zips. |
 | Optional extras (npm) | npm registry signature on every lockfile entry, by a key in `scripts/keys/npm-registry-keys.json` ([Optional extras](#optional-extras)). |
 
 GitHub provenance checks require the exact workflow certificate identity, repository, source ref and GitHub OIDC issuer ([GitHub CLI verification](https://cli.github.com/manual/gh_attestation_verify), [CLI release workflow](https://github.com/cli/cli/blob/trunk/.github/workflows/deployment.yml), [uv release workflow](https://github.com/astral-sh/uv/blob/main/.github/workflows/release.yml), [Ruff release workflow](https://github.com/astral-sh/ruff/blob/main/.github/workflows/release.yml), [golangci-lint release workflow](https://github.com/golangci/golangci-lint/blob/main/.github/workflows/release.yml)). Sigstore bundle checks require the exact workflow certificate identity and GitHub OIDC issuer ([cosign blob verification](https://docs.sigstore.dev/cosign/verifying/verify_blob/), [yq signing workflow](https://github.com/mikefarah/yq/blob/master/.github/workflows/release.yml), [Trivy signing workflow](https://github.com/aquasecurity/trivy/blob/main/.github/workflows/reusable-release.yaml), [Codex signing action](https://github.com/openai/codex/blob/main/.github/actions/linux-code-sign/action.yml)).
@@ -173,6 +175,18 @@ Expiry dates of the eight keys in the current keyring, read with `gpg --list-key
 | Juan José Arboleda | none |
 
 Refresh the keyring before the earliest date.
+
+### AWS CLI signing key
+
+The updater takes the first version heading of the AWS CLI v2 changelog, `https://raw.githubusercontent.com/aws/aws-cli/v2/CHANGELOG.rst`, which AWS links as the list of versions ([installing past releases](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-version.html)). For each architecture it downloads `awscli-exe-linux-<x86_64|aarch64>-<version>.zip` and its `.sig` from `https://awscli.amazonaws.com` and checks the signature with `gpg` against [`scripts/keys/aws-cli-public-key.asc`](../scripts/keys/aws-cli-public-key.asc). AWS publishes no checksum for the zips, so the updater computes the SHA-256 pins only after both signatures pass. When the newest version equals `AWSCLI_VERSION`, the updater downloads nothing and keeps the pins.
+
+A failed AWS CLI check stops the whole scheduled update. `main()` returns 1 and writes no pins, for every tool, as for Node.js.
+
+AWS publishes the key as text in the [AWS CLI install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), not as a file to download. The file is a copy of that block. The guide lists the key as `AWS CLI Team <aws-cli@amazon.com>`, fingerprint `FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C`, expiring 2027-07-01. `test_aws_cli_key_holds_exactly_the_pinned_fingerprint` checks the file against `AWSCLI_KEY_FINGERPRINT` in `scripts/bump_versions.py`.
+
+After 2027-07-01, GnuPG reports `EXPKEYSIG` for a release signed with this key, with the message "the pinned signing key needs a hand update". The signature check fails and the scheduled update stops for all tools until a maintainer refreshes `scripts/keys/aws-cli-public-key.asc` from the install guide. To refresh it, copy the key block from the guide into the file, set `AWSCLI_KEY_FINGERPRINT` if the fingerprint changed, update the expiry date here, and run the unit tests.
+
+Refresh the key before 2027-07-01.
 
 ## Optional extras
 

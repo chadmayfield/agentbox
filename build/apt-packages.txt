@@ -21,6 +21,7 @@ git-filter-repo
 git-flow
 git-lfs
 gnupg
+groff-base
 htop
 httpie
 iproute2

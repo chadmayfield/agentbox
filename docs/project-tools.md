@@ -13,6 +13,7 @@ The image supplies Python, uv, Node.js and npm. The examples install development
 - [Native builds](#native-builds)
 - [PostgreSQL scripts](#postgresql-scripts)
 - [Kubernetes and Helm clients](#kubernetes-and-helm-clients)
+- [AWS CLI](#aws-cli)
 - [Persistence](#persistence)
 
 ## Python tests and linting with uv
@@ -144,7 +145,17 @@ helm template example-release ./path/to/chart
 
 `kubectl kustomize` reads the local kustomization, and `helm template` renders the local chart. Remote bases, chart dependencies or template options can introduce downloads or cluster access; follow the project's instructions. Agentainer's tests use local fixtures with networking disabled and no kubeconfig. See [kubectl kustomize](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_kustomize/) and [Helm template](https://helm.sh/docs/helm/helm_template/).
 
-Cluster credentials are not included. Supply a kubeconfig at runtime only when you intend to allow cluster access, and check that kubectl is within one minor version of the API server ([kubectl version skew](https://kubernetes.io/releases/version-skew-policy/#kubectl)). Cloud authentication helpers and cloud CLIs are not bundled. Helm 4 is the current stable major selected by the upstream release API; projects requiring Helm 3 must use a compatible custom setup ([Helm releases](https://github.com/helm/helm/releases)).
+Cluster credentials are not included. Supply a kubeconfig at runtime only when you intend to allow cluster access, and check that kubectl is within one minor version of the API server ([kubectl version skew](https://kubernetes.io/releases/version-skew-policy/#kubectl)). The AWS CLI is the only bundled cloud CLI ([AWS CLI](#aws-cli)). Other cloud CLIs and cloud authentication helpers are not bundled. Helm 4 is the current stable major selected by the upstream release API; projects requiring Helm 3 must use a compatible custom setup ([Helm releases](https://github.com/helm/helm/releases)).
+
+## AWS CLI
+
+The image includes AWS CLI v2, installed from AWS's signed installer zip with its own `aws/install` script into `/usr/local/aws-cli`, with `aws` and `aws_completer` in `/usr/local/bin` ([AWS CLI install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)). The version is pinned in [`versions.env`](../versions.env) ([AWS CLI signing key](versions.md#aws-cli-signing-key)).
+
+```sh
+aws --version
+```
+
+The image carries no AWS configuration or credentials. Supply them at runtime only when you intend to allow AWS access.
 
 ## Persistence
 

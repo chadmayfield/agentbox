@@ -173,4 +173,64 @@ assert_eq "rust: normalization is idempotent" "rc=0" "$(normalize_components "$R
 assert_eq "rust: normalization keeps every component" "$(cat "$R/expected-components")" "$(cat "$R/first/components")"
 assert_contains "rust: a missing components file fails" "rc=1" "$(normalize_components "$R/no-components")"
 
+# extract-zip: the AWS CLI installer zip needs its Unix permission bits restored.
+Z="$T/zip"
+mkdir -p "$Z"
+python3 - "$Z" <<'EOF'
+import stat
+import sys
+import zipfile
+
+
+def entry(z, name, mode, data=b""):
+    info = zipfile.ZipInfo(name)
+    info.create_system = 3
+    info.external_attr = mode << 16
+    z.writestr(info, data)
+
+
+with zipfile.ZipFile(sys.argv[1] + "/good.zip", "w") as z:
+    entry(z, "aws/", stat.S_IFDIR | 0o755)
+    entry(z, "aws/install", stat.S_IFREG | 0o755, b"#!/bin/sh\n")
+    entry(z, "aws/README.md", stat.S_IFREG | 0o644, b"readme\n")
+    entry(z, "aws/open", stat.S_IFREG | 0o4777, b"x\n")
+with zipfile.ZipFile(sys.argv[1] + "/link.zip", "w") as z:
+    entry(z, "aws/", stat.S_IFDIR | 0o755)
+    entry(z, "aws/link", stat.S_IFLNK | 0o777, b"/etc/passwd")
+with zipfile.ZipFile(sys.argv[1] + "/up.zip", "w") as z:
+    entry(z, "aws/", stat.S_IFDIR | 0o755)
+    entry(z, "../escape", stat.S_IFREG | 0o644, b"x\n")
+with zipfile.ZipFile(sys.argv[1] + "/abs.zip", "w") as z:
+    entry(z, "aws/", stat.S_IFDIR | 0o755)
+    entry(z, "/abs", stat.S_IFREG | 0o644, b"x\n")
+with zipfile.ZipFile(sys.argv[1] + "/ro.zip", "w") as z:
+    entry(z, "aws/", stat.S_IFDIR | 0o555)
+    entry(z, "aws/dist/", stat.S_IFDIR | 0o555)
+    entry(z, "aws/dist/aws", stat.S_IFREG | 0o755, b"#!/bin/sh\n")
+EOF
+extract() {
+	mkdir -p "$2"
+	err=$(TARGETARCH=amd64 bash "$I" extract-zip "$1" "$2" 2>&1 >/dev/null)
+	printf 'rc=%s\n%s' "$?" "$err"
+}
+mode() { python3 -c 'import os,sys; print(oct(os.lstat(sys.argv[1]).st_mode & 0o7777))' "$1"; }
+assert_eq "zip: extracts a good archive" "rc=0" "$(extract "$Z/good.zip" "$Z/good")"
+assert_eq "zip: keeps the execute bit" "0o755" "$(mode "$Z/good/aws/install")"
+assert_eq "zip: keeps a read-only file read-only" "0o644" "$(mode "$Z/good/aws/README.md")"
+assert_eq "zip: drops setuid and other write" "0o755" "$(mode "$Z/good/aws/open")"
+assert_contains "zip: a symlink entry fails" "rc=1" "$(extract "$Z/link.zip" "$Z/link")"
+assert_eq "zip: no symlink is written" "none" "$(ls "$Z/link/aws/link" 2>/dev/null || echo none)"
+# The targets sit two levels down, so "../escape" from the target would land in $Z/t.
+mkdir -p "$Z/t"
+assert_contains "zip: a ../ entry fails" "rc=1" "$(extract "$Z/up.zip" "$Z/t/up")"
+assert_contains "zip: an absolute entry fails" "rc=1" "$(extract "$Z/abs.zip" "$Z/t/abs")"
+# find prints END only when it exits 0, so a missing directory fails instead of passing.
+assert_eq "zip: nothing is written outside or inside the targets" "END" \
+	"$(find "$Z/t" -mindepth 1 ! -path "$Z/t/up" ! -path "$Z/t/abs" -print 2>&1 && echo END)"
+assert_eq "zip: no absolute path is written" "none" "$(ls /abs 2>/dev/null || echo none)"
+assert_eq "zip: read-only directories still receive their files" "rc=0" "$(extract "$Z/ro.zip" "$Z/ro")"
+assert_eq "zip: the file under read-only directories is extracted" "0o755" "$(mode "$Z/ro/aws/dist/aws")"
+assert_eq "zip: directory modes apply after extraction" "0o555 0o555" "$(mode "$Z/ro/aws") $(mode "$Z/ro/aws/dist")"
+chmod -R u+w "$Z/ro"
+
 finish

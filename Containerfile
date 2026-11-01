@@ -113,6 +113,13 @@ ARG HELM_SHA256_AMD64
 ARG HELM_SHA256_ARM64
 RUN bash /usr/local/lib/agentainer-build/install-tool.sh helm
 
+FROM fetch AS awscli
+ARG TARGETARCH
+ARG AWSCLI_VERSION
+ARG AWSCLI_SHA256_AMD64
+ARG AWSCLI_SHA256_ARM64
+RUN bash /usr/local/lib/agentainer-build/install-tool.sh awscli
+
 FROM fetch AS claude
 ARG TARGETARCH
 ARG CLAUDE_CODE_VERSION
@@ -252,6 +259,7 @@ COPY --from=golangci-lint /usr/local/bin/golangci-lint /usr/local/bin/golangci-l
 COPY --from=tea /usr/local/bin/tea /usr/local/bin/tea
 COPY --from=kubectl /usr/local/bin/kubectl /usr/local/bin/kubectl
 COPY --from=helm /usr/local/bin/helm /usr/local/bin/helm
+COPY --from=awscli /usr/local/aws-cli /usr/local/aws-cli
 COPY --from=claude /usr/local/bin/claude /usr/local/bin/claude
 COPY --from=codex /opt/codex /opt/codex
 COPY --from=node /opt/node /opt/node
@@ -282,7 +290,10 @@ RUN cd /tmp/agentainer-build/rootfs \
 	&& ln -s /opt/node/bin/node /usr/local/bin/node \
 	&& ln -s /opt/node/bin/npm /usr/local/bin/npm \
 	&& ln -s /opt/node/bin/npx /usr/local/bin/npx \
+	&& ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws \
+	&& ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer \
 	&& test -x /usr/local/bin/codex \
+	&& /usr/local/bin/aws --version >/dev/null \
 	&& test -x /usr/local/bin/node \
 	&& /usr/local/bin/node --version >/dev/null \
 	&& test -x /usr/local/bin/agentainer-entrypoint \

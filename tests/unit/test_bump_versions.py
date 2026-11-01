@@ -1,6 +1,7 @@
 import base64
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -355,6 +356,10 @@ class HelperTests(unittest.TestCase):
         # Imports NODE_KEYRING into a temporary GNUPGHOME and lists its primary fingerprints.
         self.assertEqual(sorted(primary_fingerprints(bv.NODE_KEYRING)), sorted(bv.NODE_KEY_FINGERPRINTS))
 
+    @unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
+    def test_aws_cli_key_holds_exactly_the_pinned_fingerprint(self):
+        self.assertEqual(primary_fingerprints(bv.AWSCLI_KEY), [bv.AWSCLI_KEY_FINGERPRINT])
+
     def test_codex_uses_the_complete_package_asset(self):
         self.assertEqual(bv.codex_asset("aarch64"), "codex-package-aarch64-unknown-linux-musl.tar.gz")
 
@@ -512,6 +517,169 @@ class WriteTests(unittest.TestCase):
             for key, value in bv.values(bv.parse_env(f.read())).items():
                 with self.subTest(key=key):
                     self.assertIsNone(bv.invalid(key, value))
+
+
+AWSCLI_CHANGELOG = ("=========\nCHANGELOG\n=========\n\n2.39.3\n======\n\n* api-change:``s3``: x\n\n"
+                    "2.39.2\n======\n\n* api-change:``ec2``: y\n\n2.9.10\n======\n\n* z\n")
+
+
+class AwsCliParserTests(unittest.TestCase):
+    def test_changelog_gives_the_first_heading(self):
+        self.assertEqual(bv.parse_awscli_changelog(AWSCLI_CHANGELOG), "2.39.3")
+
+    def test_changelog_without_a_version_heading_is_refused(self):
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_awscli_changelog("=========\nCHANGELOG\n=========\n\n2.39.3 is out\n")
+
+    def test_changelog_from_another_major_is_refused(self):
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_awscli_changelog("1.44.0\n======\n\n* x\n")
+
+    def test_changelog_whose_first_heading_is_not_the_newest_is_refused(self):
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_awscli_changelog("2.39.2\n======\n\n* x\n\n2.39.3\n======\n\n* y\n")
+
+    def test_zip_url_is_the_documented_versioned_name(self):
+        self.assertEqual(bv.awscli_zip_url("aarch64", "2.0.30"),
+                         "https://awscli.amazonaws.com/awscli-exe-linux-aarch64-2.0.30.zip")
+
+    def test_resolver_is_registered(self):
+        self.assertIn(bv.r_awscli, bv.RESOLVERS)
+
+    def test_pins_are_accepted(self):
+        self.assertIsNone(bv.invalid("AWSCLI_VERSION", "2.39.3"))
+        self.assertIsNone(bv.invalid("AWSCLI_SHA256_AMD64", "a" * 64))
+        self.assertIsNone(bv.invalid("AWSCLI_SHA256_ARM64", "b" * 64))
+
+
+@unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
+class AwsCliResolverTests(unittest.TestCase):
+    """r_awscli with fetches mocked and two keys made for the test: "aws" stands in for AWS's key."""
+
+    ZIPS = {"x86_64": b"amd64 installer zip", "aarch64": b"arm64 installer zip"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.home = tempfile.mkdtemp()
+        cls.env = dict(os.environ, GNUPGHOME=cls.home)
+        cls.fpr = {}
+        for name in ("aws", "other"):
+            uid = "Test %s <%s@example.com>" % (name, name)
+            cls.gpg("--quick-gen-key", uid, "ed25519", "sign", "never")
+            out = cls.gpg("--with-colons", "--fingerprint", uid).decode()
+            cls.fpr[name] = [l.split(":")[9] for l in out.splitlines() if l.startswith("fpr")][0]
+        cls.key_file = os.path.join(cls.home, "aws.asc")
+        with open(cls.key_file, "wb") as f:
+            f.write(cls.gpg("--armor", "--export", cls.fpr["aws"]))
+
+    @classmethod
+    def gpg(cls, *args, data=None):
+        cmd = ["gpg", "--batch", "--quiet", "--pinentry-mode", "loopback", "--passphrase", ""] + list(args)
+        return subprocess.run(cmd, env=cls.env, check=True, capture_output=True, input=data).stdout
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.home, ignore_errors=True)
+
+    def sign(self, signer, data):
+        return self.gpg("--local-user", self.fpr[signer], "--detach-sign", "--output", "-", data=data)
+
+    def downloads(self, other_signer=None, missing=None, tampered=None):
+        """fetch_bytes for both zips and signatures. other_signer: the triple whose zip the
+        "other" key signs. tampered: the triple whose zip differs from the signed bytes."""
+        files = {}
+        for triple, data in self.ZIPS.items():
+            if triple == missing:
+                continue
+            url = bv.awscli_zip_url(triple, "2.39.3")
+            files[url] = data + b"!" if triple == tampered else data
+            files[url + ".sig"] = self.sign("other" if triple == other_signer else "aws", data)
+
+        def fetch_bytes(url):
+            if url not in files:
+                raise bv.LookupFailed("%s: HTTP Error 404: Not Found" % url)
+            return files[url]
+        return fetch_bytes
+
+    def resolve(self, fetch_bytes, pins=None):
+        # pins is the snapshot main takes from --file; r_awscli reads AWSCLI_VERSION from it.
+        with patch.object(bv, "fetch", return_value=AWSCLI_CHANGELOG) as fetch, \
+                patch.object(bv, "fetch_bytes", side_effect=fetch_bytes) as fb, \
+                patch.object(bv.EXTRA_FILES, "pins", dict(pins or {})), \
+                patch.object(bv, "AWSCLI_KEY", self.key_file), \
+                patch.object(bv, "AWSCLI_KEY_FINGERPRINT", self.fpr["aws"]):
+            try:
+                return bv.r_awscli()
+            finally:
+                fetch.assert_called_once_with("https://raw.githubusercontent.com/aws/aws-cli/v2/CHANGELOG.rst")
+                self.calls = [c.args[0] for c in fb.call_args_list]
+
+    def test_good_signatures_give_the_sha256_of_each_verified_zip(self):
+        out = self.resolve(self.downloads())
+        self.assertEqual(out, {
+            "AWSCLI_VERSION": "2.39.3",
+            "AWSCLI_SHA256_AMD64": hashlib.sha256(self.ZIPS["x86_64"]).hexdigest(),
+            "AWSCLI_SHA256_ARM64": hashlib.sha256(self.ZIPS["aarch64"]).hexdigest()})
+        base = "https://awscli.amazonaws.com/awscli-exe-linux-"
+        self.assertEqual(self.calls, [base + "x86_64-2.39.3.zip", base + "x86_64-2.39.3.zip.sig",
+                                      base + "aarch64-2.39.3.zip", base + "aarch64-2.39.3.zip.sig"])
+
+    def test_signature_by_another_key_is_refused_for_each_architecture(self):
+        for triple in self.ZIPS:
+            with self.subTest(triple=triple), self.assertRaises(bv.LookupFailed):
+                self.resolve(self.downloads(other_signer=triple))
+
+    def test_signature_over_other_bytes_is_refused_for_each_architecture(self):
+        for triple in self.ZIPS:
+            with self.subTest(triple=triple), self.assertRaises(bv.LookupFailed):
+                self.resolve(self.downloads(tampered=triple))
+
+    def test_missing_architecture_is_refused(self):
+        for triple in self.ZIPS:
+            with self.subTest(triple=triple), self.assertRaises(bv.LookupFailed):
+                self.resolve(self.downloads(missing=triple))
+
+    def test_pinned_version_downloads_nothing(self):
+        self.assertEqual(self.resolve(self.downloads(), pins={"AWSCLI_VERSION": "2.39.3"}), {})
+        self.assertEqual(self.calls, [])
+
+    def test_newer_version_downloads_and_verifies_both_architectures(self):
+        with patch.object(bv, "verify_signature", wraps=bv.verify_signature) as verify:
+            out = self.resolve(self.downloads(), pins={"AWSCLI_VERSION": "2.39.2"})
+        self.assertEqual(out["AWSCLI_VERSION"], "2.39.3")
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual([c.args[0] for c in verify.call_args_list], [self.ZIPS["x86_64"], self.ZIPS["aarch64"]])
+
+    def test_pinned_version_through_main_leaves_the_file_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "versions.env")
+            original = "AWSCLI_VERSION=2.39.3\nAWSCLI_SHA256_AMD64=%s\nAWSCLI_SHA256_ARM64=%s\n" % ("a" * 64, "b" * 64)
+            with open(path, "w") as f:
+                f.write(original)
+            with patch.object(bv, "fetch", return_value=AWSCLI_CHANGELOG), \
+                    patch.object(bv, "fetch_bytes") as fb, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(bv.main(["--file", path, "--only", "r_awscli"]), 0)
+            fb.assert_not_called()
+            with open(path) as f:
+                self.assertEqual(f.read(), original)
+
+    def test_bad_signature_leaves_the_pin_file_untouched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "versions.env")
+            original = "AWSCLI_VERSION=2.39.2\nAWSCLI_SHA256_AMD64=%s\nAWSCLI_SHA256_ARM64=%s\n" % ("a" * 64, "b" * 64)
+            with open(path, "w") as f:
+                f.write(original)
+            err = io.StringIO()
+            with patch.object(bv, "fetch", return_value=AWSCLI_CHANGELOG), \
+                    patch.object(bv, "fetch_bytes", side_effect=self.downloads(other_signer="aarch64")), \
+                    patch.object(bv, "AWSCLI_KEY", self.key_file), \
+                    patch.object(bv, "AWSCLI_KEY_FINGERPRINT", self.fpr["aws"]), \
+                    contextlib.redirect_stderr(err):
+                self.assertEqual(bv.main(["--file", path, "--only", "r_awscli"]), 1)
+            self.assertIn("signature", err.getvalue())
+            with open(path) as f:
+                self.assertEqual(f.read(), original)
 
 
 NOW = datetime.datetime(2026, 11, 1, 12, 0, tzinfo=datetime.timezone.utc)
