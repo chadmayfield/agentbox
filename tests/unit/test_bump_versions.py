@@ -1,5 +1,8 @@
+import base64
 import contextlib
+import datetime
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -509,6 +512,732 @@ class WriteTests(unittest.TestCase):
             for key, value in bv.values(bv.parse_env(f.read())).items():
                 with self.subTest(key=key):
                     self.assertIsNone(bv.invalid(key, value))
+
+
+NOW = datetime.datetime(2026, 11, 1, 12, 0, tzinfo=datetime.timezone.utc)
+
+
+def iso(days_before_now):
+    return (NOW - datetime.timedelta(days=days_before_now)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+class PickVersionTests(unittest.TestCase):
+    def packument(self, versions, latest):
+        return {"dist-tags": {"latest": latest},
+                "versions": {v: dict(extra, version=v) for v, (_, extra) in versions.items()},
+                "time": dict({"created": iso(400), "modified": iso(0)},
+                             **{v: iso(age) for v, (age, _) in versions.items()})}
+
+    def test_newest_version_at_least_seven_days_old(self):
+        doc = self.packument({"1.0.0": (30, {}), "1.1.0": (8, {}), "1.2.0": (3, {}),
+                              "1.3.0-beta.1": (10, {}), "1.1.5": (9, {"deprecated": "broken"}),
+                              "2.0.0": (20, {})}, latest="1.2.0")
+        # 2.0.0 is above dist-tags.latest, 1.2.0 is too young, 1.1.5 is deprecated, 1.3.0-beta.1 is a prerelease.
+        self.assertEqual(bv.pick_version(doc, NOW), "1.1.0")
+
+    def test_exactly_seven_days_qualifies(self):
+        doc = self.packument({"1.0.0": (7, {})}, latest="1.0.0")
+        self.assertEqual(bv.pick_version(doc, NOW), "1.0.0")
+
+    def test_no_qualifying_version_fails(self):
+        doc = self.packument({"1.0.0": (2, {}), "1.1.0-rc.1": (30, {})}, latest="1.0.0")
+        with self.assertRaises(bv.LookupFailed):
+            bv.pick_version(doc, NOW)
+
+    def test_version_without_a_time_entry_is_skipped(self):
+        doc = self.packument({"1.0.0": (30, {}), "1.1.0": (30, {})}, latest="1.1.0")
+        del doc["time"]["1.1.0"]
+        self.assertEqual(bv.pick_version(doc, NOW), "1.0.0")
+
+
+class NewInstallScriptsTests(unittest.TestCase):
+    def test_reports_only_packages_newly_flagged(self):
+        old = {"packages": {"": {}, "node_modules/a": {"version": "1.0.0", "hasInstallScript": True},
+                            "node_modules/c": {"version": "1.0.0"}}}
+        new = {"packages": {"": {}, "node_modules/x/node_modules/a": {"version": "1.1.0", "hasInstallScript": True},
+                            "node_modules/@s/b": {"version": "1.0.0", "hasInstallScript": True},
+                            "node_modules/c": {"version": "1.1.0"},
+                            "node_modules/node-pty": {"version": "1.0.0", "hasInstallScript": True},
+                            "node_modules/frida": {"version": "1.0.0", "hasInstallScript": True}}}
+        self.assertEqual(bv.new_install_scripts(old, new), ["@s/b"])
+
+    def test_empty_old_lockfile_reports_every_flagged_package(self):
+        new = {"packages": {"node_modules/a": {"version": "1.0.0", "hasInstallScript": True},
+                            "node_modules/b": {"version": "1.0.0"}}}
+        self.assertEqual(bv.new_install_scripts({}, new), ["a"])
+
+
+def openssl(*args):
+    return subprocess.run(["openssl"] + list(args), check=True, capture_output=True).stdout
+
+
+@unittest.skipUnless(shutil.which("openssl"), "openssl is not installed")
+class RegistrySignatureTests(unittest.TestCase):
+    """verify_registry_signature against P-256 keys made for the test."""
+
+    NAME, VERSION, INTEGRITY = "@s/pkg", "1.2.3", "sha512-" + "A" * 86 + "=="
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        cls.keys, cls.pem = {}, {}
+        for keyid in ("SHA256:good", "SHA256:old", "SHA256:other"):
+            pem = os.path.join(cls.dir, keyid.split(":")[1] + ".pem")
+            openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", pem)
+            der = openssl("ec", "-in", pem, "-pubout", "-outform", "DER")
+            cls.pem[keyid] = pem
+            cls.keys[keyid] = {"keyid": keyid, "keytype": "ecdsa-sha2-nistp256", "scheme": "ecdsa-sha2-nistp256",
+                               "expires": None, "key": base64.b64encode(der).decode()}
+        cls.keys["SHA256:old"]["expires"] = "2025-01-29T00:00:00.000Z"
+        # "other" signs but is not pinned.
+        cls.pinned = {k: v for k, v in cls.keys.items() if k != "SHA256:other"}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def sign(self, keyid, message=None):
+        message = message or "%s@%s:%s" % (self.NAME, self.VERSION, self.INTEGRITY)
+        path = os.path.join(self.dir, "message")
+        with open(path, "w") as f:
+            f.write(message)
+        sig = openssl("dgst", "-sha256", "-sign", self.pem[keyid], path)
+        return {"keyid": keyid, "sig": base64.b64encode(sig).decode()}
+
+    def verify(self, signatures, integrity=None, published=None):
+        bv.verify_registry_signature(self.NAME, self.VERSION, integrity or self.INTEGRITY, signatures,
+                                     self.pinned, published=published)
+
+    def test_valid_signature_passes(self):
+        self.verify([self.sign("SHA256:good")])
+
+    def test_unknown_keyid_fails(self):
+        with self.assertRaises(bv.LookupFailed):
+            self.verify([self.sign("SHA256:other")])
+
+    def test_changed_integrity_fails(self):
+        with self.assertRaises(bv.LookupFailed):
+            self.verify([self.sign("SHA256:good")], integrity="sha512-" + "B" * 86 + "==")
+
+    def test_signature_over_other_data_fails(self):
+        with self.assertRaises(bv.LookupFailed):
+            self.verify([self.sign("SHA256:good", message="other@1.2.3:" + self.INTEGRITY)])
+
+    def test_garbage_signature_fails(self):
+        with self.assertRaises(bv.LookupFailed):
+            self.verify([{"keyid": "SHA256:good", "sig": "bm90IGEgc2lnbmF0dXJl"}])
+
+    def test_empty_list_fails(self):
+        with self.assertRaises(bv.LookupFailed):
+            self.verify([])
+
+    def test_any_verifying_signature_with_a_known_keyid_passes(self):
+        bad = self.sign("SHA256:good", message="other@1.2.3:" + self.INTEGRITY)
+        self.verify([self.sign("SHA256:other"), bad, self.sign("SHA256:good")])
+
+    def test_expiring_key_passes_for_a_version_published_before_expiry(self):
+        published = lambda: datetime.datetime(2024, 6, 1, tzinfo=datetime.timezone.utc)
+        self.verify([self.sign("SHA256:old")], published=published)
+
+    def test_expiring_key_fails_for_a_version_published_after_expiry(self):
+        published = lambda: datetime.datetime(2025, 1, 29, tzinfo=datetime.timezone.utc)
+        with self.assertRaises(bv.LookupFailed):
+            self.verify([self.sign("SHA256:old")], published=published)
+
+    def test_expiring_key_fails_without_a_publish_time(self):
+        with self.assertRaises(bv.LookupFailed):
+            self.verify([self.sign("SHA256:old")])
+
+    def test_missing_publish_time_moves_on_to_the_next_signature(self):
+        def published():
+            raise bv.LookupFailed("unexpected registry time None")
+
+        self.verify([self.sign("SHA256:old"), self.sign("SHA256:good")], published=published)
+        with self.assertRaises(bv.LookupFailed) as ctx:
+            self.verify([self.sign("SHA256:old")], published=published)
+        self.assertIn("@s/pkg@1.2.3", str(ctx.exception))
+        self.assertIn("unexpected registry time", str(ctx.exception))
+
+    def test_check_lockfile_verifies_every_entry(self):
+        integrity = self.INTEGRITY
+        lock = {"lockfileVersion": 3, "packages": {
+            "": {"name": "wrapper", "dependencies": {"@s/pkg": "1.2.3"}},
+            "node_modules/@s/pkg": {"version": "1.2.3", "integrity": integrity,
+                                    "resolved": "https://registry.npmjs.org/@s/pkg/-/pkg-1.2.3.tgz"},
+            "node_modules/@s/pkg/node_modules/inner": {"version": "1.0.0", "inBundle": True},
+            "node_modules/alias": {"name": "@s/pkg", "version": "1.2.3", "integrity": integrity,
+                                   "resolved": "https://registry.npmjs.org/@s/pkg/-/pkg-1.2.3.tgz"},
+            "node_modules/old": {"version": "1.2.3", "integrity": integrity,
+                                 "resolved": "https://registry.npmjs.org/old/-/old-1.2.3.tgz"}}}
+        good = self.sign("SHA256:good")
+        self.NAME = "old"
+        old = self.sign("SHA256:old")
+        self.NAME = "@s/pkg"
+        docs = {"https://registry.npmjs.org/@s/pkg/1.2.3": {"dist": {"integrity": integrity, "signatures": [good]}},
+                "https://registry.npmjs.org/old/1.2.3": {"dist": {"integrity": integrity, "signatures": [old]}},
+                "https://registry.npmjs.org/old": {"time": {"1.2.3": "2024-06-01T00:00:00.000Z"}}}
+        fetched = []
+
+        def fetch(url):
+            fetched.append(url)
+            return docs[url]
+
+        bv.check_lockfile(lock, fetch_json=fetch, keys=self.pinned)
+        self.assertEqual(sorted(set(fetched)), sorted(docs))
+        docs["https://registry.npmjs.org/old"]["time"]["1.2.3"] = "2025-02-01T00:00:00.000Z"
+        with self.assertRaises(bv.LookupFailed):
+            bv.check_lockfile(lock, fetch_json=fetch, keys=self.pinned)
+
+
+class CheckLockfileTests(unittest.TestCase):
+    INTEGRITY = "sha512-" + "A" * 86 + "=="
+
+    def lock(self, **entry):
+        base = {"version": "1.0.0", "integrity": self.INTEGRITY,
+                "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz"}
+        base.update(entry)
+        return {"packages": {"": {}, "node_modules/a": {k: v for k, v in base.items() if v is not None}}}
+
+    def check(self, lock, dist):
+        verify = patch.object(bv, "verify_registry_signature")
+        with verify as verified:
+            bv.check_lockfile(lock, fetch_json=lambda url: {"dist": dist}, keys={})
+        return verified
+
+    def test_registry_integrity_must_equal_the_lockfile(self):
+        with self.assertRaises(bv.LookupFailed):
+            self.check(self.lock(), {"integrity": "sha512-" + "B" * 86 + "==", "signatures": []})
+
+    def test_matching_integrity_goes_to_the_signature_check(self):
+        verified = self.check(self.lock(), {"integrity": self.INTEGRITY, "signatures": ["s"]})
+        self.assertEqual(verified.call_args.args[:4], ("a", "1.0.0", self.INTEGRITY, ["s"]))
+
+    def test_entry_without_integrity_fails(self):
+        with self.assertRaises(bv.LookupFailed):
+            self.check(self.lock(integrity=None), {"integrity": self.INTEGRITY, "signatures": []})
+
+    def test_entry_resolved_outside_the_registry_fails(self):
+        with self.assertRaises(bv.LookupFailed):
+            self.check(self.lock(resolved="https://example.com/a-1.0.0.tgz"),
+                       {"integrity": self.INTEGRITY, "signatures": []})
+
+    def test_link_entry_is_refused(self):
+        lock = self.lock()
+        lock["packages"]["node_modules/b"] = {"resolved": "../b", "link": True}
+        with self.assertRaises(bv.LookupFailed) as ctx:
+            self.check(lock, {"integrity": self.INTEGRITY, "signatures": []})
+        self.assertIn("node_modules/b", str(ctx.exception))
+
+    def test_bundled_entry_is_covered_by_its_parent(self):
+        lock = self.lock()
+        lock["packages"]["node_modules/a/node_modules/inner"] = {"version": "2.0.0", "inBundle": True}
+        fetched = []
+
+        def fetch(url):
+            fetched.append(url)
+            return {"dist": {"integrity": self.INTEGRITY, "signatures": []}}
+
+        with patch.object(bv, "verify_registry_signature") as verified:
+            bv.check_lockfile(lock, fetch_json=fetch, keys={})
+        self.assertEqual(fetched, ["https://registry.npmjs.org/a/1.0.0"])
+        self.assertEqual(verified.call_count, 1)
+
+    def test_entry_that_is_not_an_object_is_refused(self):
+        lock = self.lock()
+        lock["packages"]["node_modules/b"] = "1.0.0"
+        with self.assertRaises(bv.LookupFailed):
+            self.check(lock, {"integrity": self.INTEGRITY, "signatures": []})
+        with self.assertRaises(bv.LookupFailed):
+            self.check({"packages": []}, {})
+        with self.assertRaises(bv.LookupFailed):
+            self.check([], {})
+
+    def test_registry_data_that_is_not_an_object_is_refused(self):
+        for doc in ([], {"dist": []}, {"dist": {"integrity": self.INTEGRITY, "signatures": {}}}):
+            with self.subTest(doc=doc):
+                with patch.object(bv, "verify_registry_signature"), self.assertRaises(bv.LookupFailed):
+                    bv.check_lockfile(self.lock(), fetch_json=lambda url, d=doc: d, keys={})
+
+    def test_names_outside_npm_naming_rules_are_refused(self):
+        for name in (".", "..", ".hidden", "_private", "@scope/..", "@../x", "a/b", "a" * 215):
+            with self.subTest(name=name):
+                with self.assertRaises(bv.LookupFailed):
+                    self.check(self.lock(name=name), {"integrity": self.INTEGRITY, "signatures": []})
+        # npm allows a scoped name to begin with a dot or an underscore.
+        verified = self.check(self.lock(name="@scope/_x"), {"integrity": self.INTEGRITY, "signatures": []})
+        self.assertEqual(verified.call_args.args[0], "@scope/_x")
+
+
+CATALOG = "rootfs/usr/local/share/agentainer/extras"
+
+
+class ExtrasTests(unittest.TestCase):
+    """r_extras and main over a temporary repo copy with npm, the registry and check_lockfile mocked."""
+
+    OLD_LOCK = {"lockfileVersion": 3, "packages": {"": {"dependencies": {"kandev": "1.0.0"}},
+                                                   "node_modules/kandev": {"version": "1.0.0"}}}
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.env = os.path.join(self.dir, "versions.env")
+        self.write("versions.env", "A=1\nKANDEV_VERSION=1.0.0\nOPENCHAMBER_VERSION=2.0.0\nREA_VERSION=3.0.0\n")
+        for key, name, extra in bv.EXTRAS:
+            pin = {"kandev": "1.0.0", "openchamber": "2.0.0", "rea": "3.0.0"}[extra]
+            self.write("%s/%s/package.json" % (CATALOG, extra),
+                       json.dumps({"private": True, "dependencies": {name: pin}}, indent=2) + "\n")
+            self.write("%s/%s/package-lock.json" % (CATALOG, extra),
+                       json.dumps(dict(self.OLD_LOCK, name=extra), indent=2) + "\n")
+            self.write("%s/%s/extra.conf" % (CATALOG, extra), "description=x\n")
+        self.latest = {"kandev": "1.1.0", "@openchamber/web": "2.1.0", "rea-agents": "3.1.0"}
+        self.new_lock_extra = {}
+        self.npm_calls = []
+        self.registry_docs = {}
+        self.lock_override = {}
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, rel, text):
+        path = os.path.join(self.dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def snapshot(self):
+        out = {}
+        for root, _, files in os.walk(self.dir):
+            for name in files:
+                path = os.path.join(root, name)
+                with open(path, "rb") as f:
+                    out[os.path.relpath(path, self.dir)] = f.read()
+        return out
+
+    def packument(self, url):
+        if url in self.registry_docs:
+            return self.registry_docs[url]
+        name = url[len("https://registry.npmjs.org/"):]
+        ver = self.latest[name]
+        return {"dist-tags": {"latest": ver}, "versions": {ver: {"version": ver}}, "time": {ver: iso(10)}}
+
+    def npm(self, argv, **kwargs):
+        self.npm_calls.append((argv, kwargs))
+        with open(os.path.join(kwargs["cwd"], "package.json")) as f:
+            deps = json.load(f)["dependencies"]
+        (name, ver), = deps.items()
+        packages = {"": {"dependencies": deps}, "node_modules/" + name: {
+            "version": ver, "integrity": "sha512-" + "A" * 86 + "==",
+            "resolved": "https://registry.npmjs.org/%s/-/x-%s.tgz" % (name, ver)}}
+        packages.update(self.new_lock_extra.get(name, {}))
+        with open(os.path.join(kwargs["cwd"], "package-lock.json"), "w") as f:
+            json.dump(self.lock_override.get(name, {"lockfileVersion": 3, "packages": packages}), f)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def run_main(self, argv=None, resolvers=None, check=None, real_check=False, github_actions=None):
+        out, err = io.StringIO(), io.StringIO()
+        environ = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS"}
+        if github_actions is not None:
+            environ["GITHUB_ACTIONS"] = github_actions
+        checker = (contextlib.nullcontext() if real_check
+                   else patch.object(bv, "check_lockfile", side_effect=check))
+        with patch.object(bv, "fetch_json", side_effect=self.packument), \
+                patch.object(bv.subprocess, "run", side_effect=self.npm), \
+                checker as checked, \
+                patch.object(bv, "utcnow", return_value=NOW), \
+                patch.dict(os.environ, environ, clear=True), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = bv.main(["--file", self.env] + (argv or []), resolvers=resolvers)
+        self.checked = checked
+        return rc, out.getvalue(), err.getvalue()
+
+    def read(self, rel):
+        with open(os.path.join(self.dir, rel)) as f:
+            return f.read()
+
+    def test_extras_resolver_is_registered_and_its_pins_validate(self):
+        self.assertIn(bv.r_extras, bv.RESOLVERS)
+        self.assertEqual([e[0] for e in bv.EXTRAS], ["KANDEV_VERSION", "OPENCHAMBER_VERSION", "REA_VERSION"])
+        self.assertEqual(bv.EXTRA_MIN_AGE_DAYS, 7)
+        for key, _, _ in bv.EXTRAS:
+            self.assertIsNone(bv.invalid(key, "0.98.0"))
+
+    def test_registry_keys_file_pins_both_npm_keys(self):
+        keys = bv.load_registry_keys(bv.NPM_KEYS)
+        self.assertEqual(sorted(keys), ["SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U",
+                                        "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"])
+        self.assertIsNone(keys["SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"]["expires"])
+        self.assertEqual(keys["SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"]["expires"],
+                         "2025-01-29T00:00:00.000Z")
+
+    def test_success_writes_pins_wrappers_and_lockfiles(self):
+        rc, out, err = self.run_main(["--only", "r_extras"])
+        self.assertEqual(rc, 0, err)
+        env = self.read("versions.env")
+        self.assertIn("KANDEV_VERSION=1.1.0\n", env)
+        self.assertIn("OPENCHAMBER_VERSION=2.1.0\n", env)
+        self.assertIn("REA_VERSION=3.1.0\n", env)
+        wrapper = json.loads(self.read(CATALOG + "/openchamber/package.json"))
+        self.assertEqual(wrapper, {"private": True, "dependencies": {"@openchamber/web": "2.1.0"}})
+        lock = json.loads(self.read(CATALOG + "/rea/package-lock.json"))
+        self.assertEqual(lock["packages"]["node_modules/rea-agents"]["version"], "3.1.0")
+        self.assertIn("extras kandev: lockfile regenerated", out)
+        self.assertEqual(self.checked.call_count, 3)
+        argv, kwargs = self.npm_calls[0]
+        self.assertEqual(argv[:6], ["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit",
+                                    "--no-fund"])
+        self.assertIn("--before=2026-10-25T12:00:00Z", argv)
+        self.assertIn("--registry=https://registry.npmjs.org/", argv)
+        self.assertTrue(any(a.startswith("--cache=") for a in argv))
+        self.assertNotEqual(kwargs["cwd"], self.dir)
+        self.assertEqual(env.splitlines()[0], "A=1")
+
+    def test_failed_check_keeps_only_that_extras_pin_and_files(self):
+        def check(lock, **kwargs):
+            if "node_modules/rea-agents" in lock["packages"]:
+                raise bv.LookupFailed("rea-agents@3.1.0: registry integrity differs from the lockfile")
+
+        before = self.snapshot()
+        rc, out, err = self.run_main(["--only", "r_extras"], check=check)
+        self.assertEqual(rc, 0, err)
+        after = self.snapshot()
+        for rel in ("package.json", "package-lock.json", "extra.conf"):
+            path = os.path.join(CATALOG, "rea", rel)
+            self.assertEqual(after[path], before[path])
+        self.assertIn(b"REA_VERSION=3.0.0\n", after["versions.env"])
+        self.assertIn(b"KANDEV_VERSION=1.1.0\n", after["versions.env"])
+        self.assertNotEqual(after[os.path.join(CATALOG, "kandev", "package-lock.json")],
+                            before[os.path.join(CATALOG, "kandev", "package-lock.json")])
+        self.assertIn("bump_versions: extras rea: rea-agents@3.1.0: registry integrity differs from the lockfile; "
+                      "pin unchanged", err)
+
+    def test_new_install_script_keeps_the_pin(self):
+        self.new_lock_extra["kandev"] = {"node_modules/evil": {"version": "1.0.0", "hasInstallScript": True}}
+        before = self.snapshot()
+        rc, out, err = self.run_main(["--only", "r_extras"])
+        self.assertEqual(rc, 0, err)
+        after = self.snapshot()
+        self.assertIn(b"KANDEV_VERSION=1.0.0\n", after["versions.env"])
+        for rel in ("package.json", "package-lock.json"):
+            path = os.path.join(CATALOG, "kandev", rel)
+            self.assertEqual(after[path], before[path])
+        self.assertIn("extras kandev:", err)
+        self.assertIn("evil", err)
+
+    def test_candidate_not_newer_keeps_the_pin_without_running_npm(self):
+        self.latest = {"kandev": "1.0.0", "@openchamber/web": "1.9.0", "rea-agents": "3.0.0"}
+        before = self.snapshot()
+        rc, out, err = self.run_main(["--only", "r_extras"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.npm_calls, [])
+
+    def test_missing_catalog_or_pin_skips_that_extra(self):
+        shutil.rmtree(os.path.join(self.dir, CATALOG, "openchamber"))
+        self.write("versions.env", "A=1\nKANDEV_VERSION=1.0.0\nOPENCHAMBER_VERSION=2.0.0\n")
+        rc, out, err = self.run_main(["--only", "r_extras"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("extras openchamber:", err)
+        self.assertIn("extras rea:", err)
+        env = self.read("versions.env")
+        self.assertIn("KANDEV_VERSION=1.1.0\n", env)
+        self.assertNotIn("REA_VERSION", env)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, CATALOG, "openchamber")))
+        self.assertEqual(len(self.npm_calls), 1)
+
+    def test_verification_failure_is_recorded_and_other_pins_are_written(self):
+        def check(lock, **kwargs):
+            if "node_modules/rea-agents" in lock["packages"]:
+                raise bv.LookupFailed("rea-agents@3.1.0: no registry signature verifies")
+
+        failures = os.path.join(self.dir, "failures.txt")
+        rc, out, err = self.run_main(["--only", "r_extras", "--failures", failures], check=check,
+                                     github_actions="true")
+        self.assertEqual(rc, 0, err)
+        line = "extras rea: rea-agents@3.1.0: no registry signature verifies"
+        with open(failures) as f:
+            self.assertEqual(f.read(), line + "\n")
+        self.assertIn("::warning::bump_versions: " + line + "\n", out)
+        self.assertIn("\n" + line + "\n", "\n" + out)
+        self.assertIn("KANDEV_VERSION=1.1.0\n", self.read("versions.env"))
+        self.assertIn("REA_VERSION=3.0.0\n", self.read("versions.env"))
+
+    def test_failure_line_is_one_line_and_the_annotation_is_escaped(self):
+        def check(lock, **kwargs):
+            if "node_modules/kandev" in lock["packages"]:
+                raise bv.LookupFailed("npm said\n100% wrong")
+
+        failures = os.path.join(self.dir, "failures.txt")
+        rc, out, err = self.run_main(["--only", "r_extras", "--failures", failures], check=check,
+                                     github_actions="true")
+        self.assertEqual(rc, 0, err)
+        with open(failures) as f:
+            self.assertEqual(f.read(), "extras kandev: npm said 100% wrong\n")
+        self.assertIn("::warning::bump_versions: extras kandev: npm said 100%25 wrong\n", out)
+
+    def test_warning_annotation_only_on_github_actions(self):
+        def check(lock, **kwargs):
+            raise bv.LookupFailed("bad")
+
+        rc, out, err = self.run_main(["--only", "r_extras"], check=check)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("::warning::", out)
+        self.assertIn("extras kandev: bad\n", out)
+
+    def test_routine_skips_leave_the_failures_file_empty(self):
+        shutil.rmtree(os.path.join(self.dir, CATALOG, "openchamber"))
+        self.latest["kandev"] = "1.0.0"
+        self.registry_docs["https://registry.npmjs.org/rea-agents"] = {
+            "dist-tags": {"latest": "3.1.0"}, "versions": {"3.1.0": {}}, "time": {"3.1.0": iso(2)}}
+        failures = os.path.join(self.dir, "failures.txt")
+        rc, out, err = self.run_main(["--only", "r_extras", "--failures", failures], github_actions="true")
+        self.assertEqual(rc, 0, err)
+        with open(failures) as f:
+            self.assertEqual(f.read(), "")
+        self.assertNotIn("extras", out)
+        self.assertIn("extras openchamber:", err)
+        self.assertIn("extras rea:", err)
+        self.assertEqual(self.npm_calls, [])
+
+    def test_failures_file_is_not_created_without_the_option(self):
+        def check(lock, **kwargs):
+            raise bv.LookupFailed("bad")
+
+        rc, out, err = self.run_main(["--only", "r_extras"], check=check)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(sorted(p for p in os.listdir(self.dir)), ["rootfs", "versions.env"])
+
+    def test_malformed_data_is_a_verification_failure_for_that_extra_only(self):
+        # A lockfile that is a list, and a registry document for one version that is a list.
+        self.lock_override["kandev"] = []
+        self.registry_docs["https://registry.npmjs.org/rea-agents/3.1.0"] = []
+        self.registry_docs["https://registry.npmjs.org/@openchamber/web/2.1.0"] = {
+            "dist": {"integrity": "sha512-" + "B" * 86 + "==", "signatures": []}}
+        failures = os.path.join(self.dir, "failures.txt")
+        rc, out, err = self.run_main(["--only", "r_extras", "--failures", failures], real_check=True)
+        self.assertEqual(rc, 0, err)
+        with open(failures) as f:
+            lines = f.read().splitlines()
+        self.assertEqual([line.split(":")[0] for line in lines],
+                         ["extras kandev", "extras openchamber", "extras rea"])
+        env = self.read("versions.env")
+        for pin in ("KANDEV_VERSION=1.0.0", "OPENCHAMBER_VERSION=2.0.0", "REA_VERSION=3.0.0"):
+            self.assertIn(pin + "\n", env)
+
+    def test_unexpected_shape_inside_a_check_stays_with_that_extra(self):
+        error = AttributeError("'list' object has no attribute 'get'")
+        with patch.object(bv, "new_install_scripts", side_effect=[[], error, []]):
+            rc, out, err = self.run_main(["--only", "r_extras"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("extras openchamber: 'list' object has no attribute 'get'\n", out)
+        env = self.read("versions.env")
+        self.assertIn("KANDEV_VERSION=1.1.0\n", env)
+        self.assertIn("OPENCHAMBER_VERSION=2.0.0\n", env)
+        self.assertIn("REA_VERSION=3.1.0\n", env)
+
+    def test_malformed_registry_times_are_failures(self):
+        failures = os.path.join(self.dir, "failures.txt")
+        for case, time_map in (("absent", None), ("empty", {}), ("not a string", {"3.1.0": 12345})):
+            with self.subTest(case=case):
+                doc = {"dist-tags": {"latest": "3.1.0"}, "versions": {"3.1.0": {}}}
+                if time_map is not None:
+                    doc["time"] = time_map
+                self.registry_docs["https://registry.npmjs.org/rea-agents"] = doc
+                rc, out, err = self.run_main(["--only", "r_extras", "--failures", failures])
+                self.assertEqual(rc, 0, err)
+                with open(failures) as f:
+                    lines = f.read().splitlines()
+                self.assertEqual([line.split(":")[0] for line in lines], ["extras rea"])
+                self.assertIn("REA_VERSION=3.0.0\n", self.read("versions.env"))
+
+    def test_too_young_version_is_a_quiet_skip(self):
+        self.registry_docs["https://registry.npmjs.org/rea-agents"] = {
+            "dist-tags": {"latest": "3.1.0"}, "versions": {"3.1.0": {}}, "time": {"3.1.0": iso(2)}}
+        failures = os.path.join(self.dir, "failures.txt")
+        rc, out, err = self.run_main(["--only", "r_extras", "--failures", failures])
+        self.assertEqual(rc, 0, err)
+        with open(failures) as f:
+            self.assertNotIn("extras rea", f.read())
+        self.assertIn("extras rea:", err)
+
+    def test_failed_run_still_leaves_an_empty_failures_file(self):
+        def boom():
+            raise bv.LookupFailed("network down")
+
+        failures = os.path.join(self.dir, "failures.txt")
+        with open(failures, "w") as f:
+            f.write("stale\n")
+        rc, out, err = self.run_main(["--failures", failures], resolvers=[boom])
+        self.assertEqual(rc, 1)
+        with open(failures) as f:
+            self.assertEqual(f.read(), "")
+        os.unlink(failures)
+        rc, out, err = self.run_main(["--failures", failures, "--only", "r_nope"])
+        self.assertEqual(rc, 2)
+        with open(failures) as f:
+            self.assertEqual(f.read(), "")
+
+    def test_failures_found_before_a_failed_run_still_reach_the_file(self):
+        def check(lock, **kwargs):
+            if "node_modules/rea-agents" in lock["packages"]:
+                raise bv.LookupFailed("rea-agents@3.1.0: no registry signature verifies")
+
+        def boom():
+            raise bv.LookupFailed("network down")
+
+        failures = os.path.join(self.dir, "failures.txt")
+        before = self.snapshot()
+        rc, out, err = self.run_main(["--failures", failures], resolvers=[bv.r_extras, boom], check=check)
+        self.assertEqual(rc, 1)
+        with open(failures) as f:
+            self.assertEqual(f.read(), "extras rea: rea-agents@3.1.0: no registry signature verifies\n")
+        after = self.snapshot()
+        del after["failures.txt"]
+        self.assertEqual(after, before)
+
+    def test_unwritable_failures_file_is_a_clean_error(self):
+        failures = os.path.join(self.dir, "missing-dir", "failures.txt")
+        before = self.snapshot()
+        rc, out, err = self.run_main(["--failures", failures, "--only", "r_extras"])
+        self.assertEqual(rc, 2)
+        self.assertIn("bump_versions: cannot write --failures %s: " % failures, err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.npm_calls, [])
+
+    def failing_report_write(self, failures):
+        """Patch write_atomic so every write to failures after the first (the truncation) raises."""
+        real = bv.write_atomic
+        calls = []
+
+        def write(path, text):
+            if path == failures:
+                calls.append(text)
+                if len(calls) > 1:
+                    raise OSError(28, "No space left on device")
+            real(path, text)
+
+        return patch.object(bv, "write_atomic", side_effect=write)
+
+    def test_failures_file_write_error_after_failures_fails_the_run(self):
+        def check(lock, **kwargs):
+            if "node_modules/rea-agents" in lock["packages"]:
+                raise bv.LookupFailed("rea-agents@3.1.0: no registry signature verifies")
+
+        failures = os.path.join(self.dir, "failures.txt")
+        with self.failing_report_write(failures):
+            rc, out, err = self.run_main(["--only", "r_extras", "--failures", failures], check=check)
+        self.assertEqual(rc, 2)
+        self.assertIn("bump_versions: cannot write --failures %s: " % failures, err)
+        self.assertIn("No space left on device", err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn("extras rea: rea-agents@3.1.0: no registry signature verifies\n", out)
+        self.assertIn("KANDEV_VERSION=1.1.0\n", self.read("versions.env"))
+
+    def test_failures_file_write_error_keeps_a_nonzero_exit_code(self):
+        def check(lock, **kwargs):
+            if "node_modules/rea-agents" in lock["packages"]:
+                raise bv.LookupFailed("bad")
+
+        def boom():
+            raise bv.LookupFailed("network down")
+
+        failures = os.path.join(self.dir, "failures.txt")
+        with self.failing_report_write(failures):
+            rc, out, err = self.run_main(["--failures", failures], resolvers=[bv.r_extras, boom], check=check)
+        self.assertEqual(rc, 1)
+        self.assertIn("bump_versions: cannot write --failures %s: " % failures, err)
+
+    def test_failures_file_write_error_does_not_mask_an_exception(self):
+        original = RuntimeError("original error")
+
+        def bump(args, resolvers):
+            bv.EXTRA_FILES.failures.append("extras rea: bad")
+            raise original
+
+        failures = os.path.join(self.dir, "failures.txt")
+        with self.failing_report_write(failures), patch.object(bv, "bump", side_effect=bump):
+            with self.assertRaises(RuntimeError) as caught:
+                self.run_main(["--failures", failures])
+        self.assertIs(caught.exception, original)
+
+    def test_failures_file_write_error_without_failures_keeps_success(self):
+        failures = os.path.join(self.dir, "failures.txt")
+        with self.failing_report_write(failures):
+            rc, out, err = self.run_main(["--only", "r_extras", "--failures", failures])
+        self.assertEqual(rc, 0, err)
+        with open(failures) as f:
+            self.assertEqual(f.read(), "")
+        self.assertIn("bump_versions: cannot write --failures %s: " % failures, err)
+        self.assertIn("KANDEV_VERSION=1.1.0\n", self.read("versions.env"))
+
+    def test_broken_stdout_still_writes_the_failures_file(self):
+        class BrokenPipe(io.StringIO):
+            def write(self, s):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        def check(lock, **kwargs):
+            if "node_modules/kandev" not in lock["packages"]:
+                raise bv.LookupFailed("bad")
+
+        failures = os.path.join(self.dir, "failures.txt")
+        # bump prints progress to stdout too, so only the report runs against the broken stream.
+        real_bump = bv.bump
+
+        def bump(args, resolvers):
+            rc = real_bump(args, resolvers)
+            sys.stdout = BrokenPipe()
+            return rc
+
+        stdout = sys.stdout
+        try:
+            with patch.object(bv, "bump", side_effect=bump):
+                rc, out, err = self.run_main(["--only", "r_extras", "--failures", failures], check=check,
+                                             github_actions="true")
+        finally:
+            sys.stdout = stdout
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("Traceback", err)
+        with open(failures) as f:
+            self.assertEqual(f.read().splitlines(), ["extras openchamber: bad", "extras rea: bad"])
+
+    def test_catalog_files_are_written_before_versions_env(self):
+        written = []
+        real = bv.write_atomic
+
+        def record(path, text):
+            written.append(os.path.relpath(path, self.dir))
+            real(path, text)
+
+        with patch.object(bv, "write_atomic", side_effect=record):
+            rc, out, err = self.run_main(["--only", "r_extras"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(written), 7)
+        self.assertEqual(written[-1], "versions.env")
+
+    def test_failed_write_leaves_no_temp_file(self):
+        target = os.path.join(self.dir, "versions.env")
+        with patch.object(bv.os, "replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            bv.write_atomic(target, "A=2\n")
+        self.assertEqual(sorted(os.listdir(self.dir)), ["rootfs", "versions.env"])
+        self.assertEqual(self.read("versions.env").splitlines()[0], "A=1")
+
+    def test_written_file_keeps_its_mode(self):
+        target = os.path.join(self.dir, "versions.env")
+        os.chmod(target, 0o644)
+        bv.write_atomic(target, "A=2\n")
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o644)
+
+    def test_failure_in_another_resolver_writes_nothing(self):
+        def boom():
+            raise bv.LookupFailed("network down")
+
+        before = self.snapshot()
+        rc, out, err = self.run_main(resolvers=[bv.r_extras, boom])
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.snapshot(), before)
+        # Files computed by the failed run are not written by the next one.
+        rc, out, err = self.run_main(resolvers=[lambda: {}])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.snapshot(), before)
 
 
 if __name__ == "__main__":
