@@ -19,7 +19,6 @@ assert_contains "ping works without NET_RAW" "1 received" \
 assert_contains "fd runs" "fd" "$(run_in -- fd --version)"
 assert_contains "bat runs" "bat" "$(run_in -- bat --version)"
 assert_contains "python is 3.14" "Python 3.14" "$(run_in -- python3 --version)"
-assert_contains "node is 22" "v22." "$(run_in -- node --version)"
 assert_contains "tmux runs" "tmux 3.6" "$(run_in -- tmux -V)"
 assert_contains "pip --user is refused (PEP 668)" "externally-managed" "$(run_in -- sh -c 'python3 -m pip install --user requests 2>&1 || true')"
 
@@ -34,5 +33,7 @@ assert_eq "ansible-galaxy installs collections" "agentainer.fixture 1.0.0" "$(ru
 	ansible-galaxy collection list agentainer.fixture --format json |
 		python3 -c "import json, sys; print(*(n + \" \" + c[\"version\"] for p in json.load(sys.stdin).values() for n, c in p.items()))"
 ' 2>&1)"
+
+assert_eq "openssl headers installed" "yes" "$(run_in -- sh -c 'test -f /usr/include/openssl/ssl.h && echo yes')"
 
 finish

@@ -27,13 +27,13 @@ iproute2
 iputils-ping
 jq
 less
+libatomic1
 libimage-exiftool-perl
+libssl-dev
 make
 nano
 netcat-openbsd
 ninja-build
-nodejs
-npm
 openssh-client
 oras
 patch

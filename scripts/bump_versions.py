@@ -434,6 +434,19 @@ CLAUDE_RELEASES = "https://downloads.claude.ai/claude-code-releases"
 CLAUDE_KEY_URL = "https://downloads.claude.ai/keys/claude-code.asc"
 CLAUDE_KEY_FINGERPRINT = "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
 CLAUDE_PLATFORMS = (("AMD64", "linux-x64"), ("ARM64", "linux-arm64"))
+# Node's active release keys, listed after the README marker <!-- Active releasers keys --> in nodejs/release-keys at
+# commit 481637f813e912c4aa3622d7964ab426c97b8e8d. NODE_KEYRING holds exactly these keys.
+NODE_KEY_FINGERPRINTS = (
+    "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356",
+    "DD792F5973C6DE52C432CBDAC77ABFA00DDBF2B7",
+    "CC68F5A3106FF448322E48ED27F5E38D5B0A215F",
+    "890C08DB8579162FEE0DF9DB8BEAB4DFCF555EF4",
+    "C82FA3AE1CBEDC6BE46B9360C43CEC45C17AB93C",
+    "108F52B48DB57BB0CC439B2997B01419BD92F80A",
+    "655F3B5C1FB3FA8D1A0CA6BDE4A7D232B936D2FD",
+    "A363A499291CBBC940DD62E41F10027AF002F8B0",
+)
+NODE_KEYRING = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys", "nodejs-release-keys.asc")
 
 
 def parse_claude_manifest(doc, ver):
@@ -449,13 +462,14 @@ def parse_claude_manifest(doc, ver):
     return out
 
 
-def verify_signature(data, sig, key, fingerprint):
-    """Raise LookupFailed unless sig is a valid signature of data by the key with fingerprint.
+def verify_signature(data, sig, key, fingerprints):
+    """Raise LookupFailed unless sig is a valid signature of data by a key in the set fingerprints.
 
-    The key file comes from the same host as the data, so it must hold exactly one primary
-    key, and gpg's status output must name that key as the signer. gpg --verify alone
-    accepts a signature by any key in the keyring.
+    fingerprints is one fingerprint or a tuple of them. The key file must hold exactly that set
+    of primary keys, and gpg's status output must name one of them as the signer. gpg --verify
+    alone accepts a signature by any key in the keyring.
     """
+    wanted = frozenset([fingerprints] if isinstance(fingerprints, str) else fingerprints)
     with tempfile.TemporaryDirectory() as home:
         env = dict(os.environ, GNUPGHOME=home)
         paths = {}
@@ -472,11 +486,12 @@ def verify_signature(data, sig, key, fingerprint):
             # The fpr line right after each pub line is that primary key's fingerprint.
             primaries = [lines[i + 1].split(":")[9] for i, line in enumerate(lines)
                          if line.startswith("pub:") and i + 1 < len(lines) and lines[i + 1].startswith("fpr:")]
-            if primaries != [fingerprint]:
-                raise LookupFailed("signing key file holds %s, expected only %s" % (primaries, fingerprint))
-            # --trusted-key accepts this key for the check without a trust database entry.
-            status = subprocess.run(gpg + ["--status-fd", "1", "--trusted-key", fingerprint[-16:],
-                                           "--verify", paths["sig"], paths["data"]],
+            if len(primaries) != len(wanted) or set(primaries) != wanted:
+                raise LookupFailed("signing key file holds %s, expected only %s"
+                                   % (sorted(primaries), sorted(wanted)))
+            # --trusted-key accepts these keys for the check without a trust database entry.
+            trusted = [arg for fpr in sorted(wanted) for arg in ("--trusted-key", fpr[-16:])]
+            status = subprocess.run(gpg + ["--status-fd", "1"] + trusted + ["--verify", paths["sig"], paths["data"]],
                                     env=env, check=True, capture_output=True, text=True).stdout
         except (OSError, subprocess.CalledProcessError) as e:
             raise LookupFailed("signature check failed: %s" % e)
@@ -485,8 +500,12 @@ def verify_signature(data, sig, key, fingerprint):
     words = [line.split() for line in status.splitlines() if line.startswith("[GNUPG:] ")]
     good = any(w[1] == "GOODSIG" for w in words if len(w) > 1)
     signers = [w[-1] for w in words if len(w) > 2 and w[1] == "VALIDSIG"]
-    if not good or signers != [fingerprint]:
-        raise LookupFailed("signature is not a good signature by %s" % fingerprint)
+    if not good or len(signers) != 1 or signers[0] not in wanted:
+        bad = sorted({w[1] for w in words if len(w) > 1 and w[1] in ("EXPKEYSIG", "REVKEYSIG")})
+        if bad:
+            raise LookupFailed("signature check reported %s; the pinned signing key needs a hand update"
+                               % " and ".join(bad))
+        raise LookupFailed("signature is not a good signature by one of %s" % sorted(wanted))
 
 
 def r_claude():
@@ -499,6 +518,52 @@ def r_claude():
     verify_signature(manifest, fetch_bytes(base + "manifest.json.sig"), fetch_bytes(CLAUDE_KEY_URL),
                      CLAUDE_KEY_FINGERPRINT)
     return parse_claude_manifest(json.loads(manifest), ver)
+
+
+NODE_DIST = "https://nodejs.org/dist"
+NODE_MAJOR = 26
+
+
+def parse_node_index(doc, major):
+    """Newest release of one Node.js major from nodejs.org/dist/index.json, without the v."""
+    if not isinstance(doc, list):
+        raise LookupFailed("node: unexpected index.json shape")
+    pattern = re.compile(r"v(%d\.[0-9]+\.[0-9]+)" % major)
+    found = [m.group(1) for m in (pattern.fullmatch(str(e.get("version", ""))) for e in doc if isinstance(e, dict))
+             if m]
+    if not found:
+        raise LookupFailed("node: no release of major %d in index.json" % major)
+    return max(found, key=version_key)
+
+
+def parse_node_shasums(text, ver):
+    """Both linux tarball hashes for one version from SHASUMS256.txt."""
+    names = {"NODE_SHA256_AMD64": "node-v%s-linux-x64.tar.xz" % ver,
+             "NODE_SHA256_ARM64": "node-v%s-linux-arm64.tar.xz" % ver}
+    hashes = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            hashes[parts[1]] = parts[0]
+    out = {"NODE_VERSION": ver}
+    for key, name in names.items():
+        digest = hashes.get(name, "")
+        if not HEX64.match(digest):
+            raise LookupFailed("node: no valid sha256 for %s in SHASUMS256.txt" % name)
+        out[key] = digest
+    return out
+
+
+def r_node():
+    # nodejs.org signs SHASUMS256.txt with the release keys pinned in scripts/keys.
+    ver = parse_node_index(fetch_json(NODE_DIST + "/index.json"), NODE_MAJOR)
+    base = "%s/v%s/SHASUMS256.txt" % (NODE_DIST, ver)
+    shasums = fetch_bytes(base)
+    sig = fetch_bytes(base + ".sig")
+    with open(NODE_KEYRING, "rb") as f:
+        key = f.read()
+    verify_signature(shasums, sig, key, NODE_KEY_FINGERPRINTS)
+    return parse_node_shasums(shasums.decode(), ver)
 
 
 def r_agy():
@@ -564,7 +629,7 @@ def r_buildkit():
 
 
 RESOLVERS = [r_base, r_go, r_rust, r_yq, r_gh, r_uv, r_ruff, r_trivy, r_abtop, r_unslop, r_golangci,
-             r_kubectl, r_helm, r_tea, r_claude, r_codex, r_agy, r_opencode, r_k8s_images, r_buildkit]
+             r_kubectl, r_helm, r_tea, r_claude, r_node, r_codex, r_agy, r_opencode, r_k8s_images, r_buildkit]
 
 
 def main(argv=None, resolvers=None):

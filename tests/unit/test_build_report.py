@@ -37,13 +37,15 @@ class BuildReportTests(unittest.TestCase):
     def test_versions_lists_pinned_versions_and_key_packages(self):
         path = self.write(json.dumps({
             "pins": {"CLAUDE_CODE_VERSION": "2.1.287", "GO_VERSION": "1.27.2",
+                     "NODE_VERSION": "26.13.0",
                      "CODEX_SHA256_AMD64": "ab" * 32, "APT_SNAPSHOT": "20261008T000000Z",
                      "BASE_IMAGE": "docker.io/library/ubuntu:26.04@sha256:" + "f" * 64},
             "apt": {"nodejs": "22.22.1-1", "git": "1:2.53.0-1", "zip": "3.0"}}))
         out = br.versions(path)
         self.assertIn("| claude-code | 2.1.287 |", out)
         self.assertIn("| go | 1.27.2 |", out)
-        self.assertIn("| nodejs (apt) | 22.22.1-1 |", out)
+        self.assertIn("| node | 26.13.0 |", out)
+        self.assertNotIn("nodejs (apt)", out)
         self.assertNotIn("SHA256", out)
         self.assertIn("20261008T000000Z", out)
         self.assertIn("sha256:ffffffffffff", out)

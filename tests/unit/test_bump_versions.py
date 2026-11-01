@@ -1,10 +1,12 @@
+import contextlib
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 import bump_versions as bv  # noqa: E402
@@ -195,6 +197,45 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(bv.LookupFailed):
             bv.parse_claude_manifest(doc, "2.1.292")
 
+    def test_node_index_picks_newest_of_the_major(self):
+        doc = [{"version": "v28.0.0"}, {"version": "v26.14.0-rc.1"}, {"version": "v26.9.1"},
+               {"version": "v26.13.0"}, {"version": "v24.22.2"}, {"version": "v26.99.0\n"}]
+        self.assertEqual(bv.parse_node_index(doc, 26), "26.13.0")
+
+    def test_node_index_with_an_unexpected_shape_is_refused(self):
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_index({"version": "v26.13.0"}, 26)
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_index(["v26.13.0"], 26)
+
+    def test_node_index_skips_entries_that_are_not_objects(self):
+        self.assertEqual(bv.parse_node_index(["junk", {"version": "v26.13.0"}], 26), "26.13.0")
+
+    def test_node_index_without_the_major_is_refused(self):
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_index([{"version": "v24.22.2"}], 26)
+
+    def test_node_shasums_gives_both_linux_hashes(self):
+        text = ("%s  node-v26.13.0-linux-arm64.tar.xz\n%s  node-v26.13.0-linux-x64.tar.xz\n"
+                "%s  node-v26.13.0-darwin-arm64.tar.gz\n"
+                "%s  node-v26.13.0-linux-x64-musl.tar.xz\n%s  node-v26.13.0-linux-x64.tar.xz.sig\n"
+                "%s  node-v26.13.01-linux-x64.tar.xz\n%s  *node-v26.13.0-linux-x64.tar.xz\n"
+                ) % ("a" * 64, "b" * 64, "c" * 64, "d" * 64, "d" * 64, "d" * 64, "d" * 64)
+        self.assertEqual(bv.parse_node_shasums(text, "26.13.0"),
+                         {"NODE_VERSION": "26.13.0", "NODE_SHA256_AMD64": "b" * 64, "NODE_SHA256_ARM64": "a" * 64})
+
+    def test_node_shasums_missing_an_arch_is_refused(self):
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_shasums("%s  node-v26.13.0-linux-x64.tar.xz\n" % ("b" * 64), "26.13.0")
+
+    def test_node_shasums_with_a_bad_hash_is_refused(self):
+        text = "%s  node-v26.13.0-linux-x64.tar.xz\n%s  node-v26.13.0-linux-arm64.tar.xz\n" % ("B" * 64, "a" * 64)
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_shasums(text, "26.13.0")
+
+    def test_node_resolver_is_registered(self):
+        self.assertIn(bv.r_node, bv.RESOLVERS)
+
 
 @unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
 class SignatureTests(unittest.TestCase):
@@ -252,8 +293,65 @@ class SignatureTests(unittest.TestCase):
         with self.assertRaises(bv.LookupFailed):
             bv.verify_signature(self.data, self.sig["release"], keys, self.fpr["release"])
 
+    def test_any_key_in_the_set_may_sign(self):
+        keys = self.key["release"] + self.key["other"]
+        both = (self.fpr["release"], self.fpr["other"])
+        bv.verify_signature(self.data, self.sig["other"], keys, both)
+
+    def test_key_file_must_hold_exactly_the_set(self):
+        keys = self.key["release"] + self.key["other"]
+        with self.assertRaises(bv.LookupFailed):
+            bv.verify_signature(self.data, self.sig["release"], keys, (self.fpr["release"], "0" * 40))
+
+    def test_signature_by_a_key_outside_the_file_fails(self):
+        # gpg refuses it for lack of the public key, before the signer-in-set check runs.
+        keys = self.key["release"] + self.key["other"]
+        third = self.make_key("third")
+        sig = self.gpg("--local-user", third, "--detach-sign", "--output", "-", self.data_file)
+        with self.assertRaises(bv.LookupFailed):
+            bv.verify_signature(self.data, sig, keys, (self.fpr["release"], self.fpr["other"]))
+
+    def test_expired_key_is_refused_naming_expkeysig(self):
+        at = "20200101T000000!"
+        uid = "Test expired <expired@example.com>"
+        self.gpg("--faked-system-time", at, "--quick-gen-key", uid, "ed25519", "sign", "1d")
+        out = self.gpg("--with-colons", "--fingerprint", uid).decode()
+        fpr = [l.split(":")[9] for l in out.splitlines() if l.startswith("fpr")][0]
+        sig = self.gpg("--faked-system-time", at, "--local-user", fpr, "--detach-sign", "--output", "-",
+                       self.data_file)
+        with self.assertRaises(bv.LookupFailed) as ctx:
+            bv.verify_signature(self.data, sig, self.gpg("--armor", "--export", fpr), (fpr,))
+        self.assertIn("EXPKEYSIG", str(ctx.exception))
+
+    def test_signing_subkey_reports_its_primary(self):
+        # Some Node releasers sign with a subkey (release-keys README).
+        primary = self.make_key("withsub")
+        self.gpg("--quick-add-key", primary, "ed25519", "sign", "never")
+        sub = [l.split(":")[4] for l in self.gpg("--with-colons", "--list-keys", primary).decode().splitlines()
+               if l.startswith("sub")][0]
+        sig = self.gpg("--local-user", sub + "!", "--detach-sign", "--output", "-", self.data_file)
+        bv.verify_signature(self.data, sig, self.gpg("--armor", "--export", primary), (primary,))
+
+
+def primary_fingerprints(path):
+    """Primary key fingerprints of a key file, listed from a temporary GNUPGHOME."""
+    with tempfile.TemporaryDirectory() as home:
+        env = dict(os.environ, GNUPGHOME=home)
+        gpg = ["gpg", "--batch", "--no-tty"]
+        subprocess.run(gpg + ["--import", path], env=env, check=True, capture_output=True)
+        out = subprocess.run(gpg + ["--with-colons", "--fingerprint"], env=env, check=True,
+                             capture_output=True, text=True).stdout
+    lines = out.splitlines()
+    return [lines[i + 1].split(":")[9] for i, line in enumerate(lines)
+            if line.startswith("pub:") and i + 1 < len(lines) and lines[i + 1].startswith("fpr:")]
+
 
 class HelperTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
+    def test_node_keyring_holds_exactly_the_pinned_fingerprints(self):
+        # Imports NODE_KEYRING into a temporary GNUPGHOME and lists its primary fingerprints.
+        self.assertEqual(sorted(primary_fingerprints(bv.NODE_KEYRING)), sorted(bv.NODE_KEY_FINGERPRINTS))
+
     def test_codex_uses_the_complete_package_asset(self):
         self.assertEqual(bv.codex_asset("aarch64"), "codex-package-aarch64-unknown-linux-musl.tar.gz")
 
@@ -322,6 +420,10 @@ class ValidationTests(unittest.TestCase):
                 self.assertIsNotNone(bv.invalid("AGY_URL_AMD64", url))
         self.assertIsNone(bv.invalid("AGY_URL_AMD64", good["url"]))
 
+    def test_node_pins_are_accepted(self):
+        self.assertIsNone(bv.invalid("NODE_VERSION", "26.13.0"))
+        self.assertIsNone(bv.invalid("NODE_SHA256_AMD64", "b" * 64))
+
 
 class WriteTests(unittest.TestCase):
     def setUp(self):
@@ -385,6 +487,21 @@ class WriteTests(unittest.TestCase):
             with self.subTest(update=update):
                 self.assertEqual(bv.main(["--file", self.path], resolvers=[lambda u=update: u]), 1)
                 self.assertEqual(self.read(), "A=1\n")
+
+    @unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
+    def test_node_with_a_bad_signature_leaves_file_untouched(self):
+        shasums = ("%s  node-v26.99.0-linux-x64.tar.xz\n%s  node-v26.99.0-linux-arm64.tar.xz\n"
+                   % ("b" * 64, "a" * 64)).encode()
+        err = io.StringIO()
+        with patch.object(bv, "fetch_json", return_value=[{"version": "v26.99.0"}]) as fj, \
+                patch.object(bv, "fetch_bytes", side_effect=[shasums, b"not a signature"]) as fb, \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(bv.main(["--file", self.path, "--only", "r_node"]), 1)
+        fj.assert_called_once_with("https://nodejs.org/dist/index.json")
+        self.assertEqual(fb.call_args_list, [call("https://nodejs.org/dist/v26.99.0/SHASUMS256.txt"),
+                                             call("https://nodejs.org/dist/v26.99.0/SHASUMS256.txt.sig")])
+        self.assertIn("signature", err.getvalue())
+        self.assertEqual(self.read(), "A=1\n")
 
     def test_current_pins_pass_validation(self):
         here = os.path.dirname(os.path.abspath(__file__))

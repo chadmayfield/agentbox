@@ -14,7 +14,7 @@ import json
 import re
 import sys
 
-KEY_APT = ("bash", "git", "nodejs", "python3", "tmux")
+KEY_APT = ("bash", "git", "python3", "tmux")
 MAX_LAYERS = 10
 MAX_COMMAND = 120
 MiB = 1024 * 1024

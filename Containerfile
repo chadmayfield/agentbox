@@ -127,6 +127,19 @@ ARG CODEX_SHA256_AMD64
 ARG CODEX_SHA256_ARM64
 RUN bash /usr/local/lib/agentainer-build/install-tool.sh codex
 
+FROM fetch AS node
+ARG TARGETARCH
+ARG NODE_VERSION
+ARG NODE_SHA256_AMD64
+ARG NODE_SHA256_ARM64
+# node links libatomic.so.1, which the final image gets from apt-packages.txt. This install
+# comes from the live archive only for the node --version check in this stage and is not
+# copied into the image.
+RUN apt-get update \
+	&& DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libatomic1 \
+	&& rm -rf /var/lib/apt/lists/*
+RUN bash /usr/local/lib/agentainer-build/install-tool.sh node
+
 FROM fetch AS agy
 ARG TARGETARCH
 ARG AGY_URL_AMD64
@@ -241,6 +254,7 @@ COPY --from=kubectl /usr/local/bin/kubectl /usr/local/bin/kubectl
 COPY --from=helm /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=claude /usr/local/bin/claude /usr/local/bin/claude
 COPY --from=codex /opt/codex /opt/codex
+COPY --from=node /opt/node /opt/node
 COPY --from=agy /usr/local/bin/agy /usr/local/bin/agy
 COPY --from=opencode /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=unslop /usr/local/share/agentainer/skills/unslop /usr/local/share/agentainer/skills/unslop
@@ -265,7 +279,12 @@ RUN cd /tmp/agentainer-build/rootfs \
 	&& cd / \
 	&& rm -rf /tmp/agentainer-build/rootfs \
 	&& ln -s /opt/codex/bin/codex /usr/local/bin/codex \
+	&& ln -s /opt/node/bin/node /usr/local/bin/node \
+	&& ln -s /opt/node/bin/npm /usr/local/bin/npm \
+	&& ln -s /opt/node/bin/npx /usr/local/bin/npx \
 	&& test -x /usr/local/bin/codex \
+	&& test -x /usr/local/bin/node \
+	&& /usr/local/bin/node --version >/dev/null \
 	&& test -x /usr/local/bin/agentainer-entrypoint \
 	&& python3 /tmp/agentainer-build/write-versions-json.py
 
@@ -285,6 +304,7 @@ LABEL org.opencontainers.image.version="${IMAGE_VERSION}" \
 ENV DISABLE_UPDATES=1 \
 	AGY_CLI_DISABLE_AUTO_UPDATE=true \
 	OPENCODE_DISABLE_AUTOUPDATE=1 \
+	NPM_CONFIG_UPDATE_NOTIFIER=false \
 	CLAUDE_CODE_NONBLOCKING_STDOUT=1 \
 	CLAUDE_CODE_TMUX_TRUECOLOR=1
 

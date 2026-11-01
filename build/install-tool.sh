@@ -13,6 +13,7 @@ amd64)
 	TRIVY_ARCH=64bit
 	OC=linux-x64-baseline
 	CLAUDE_PLATFORM=linux-x64
+	NODE_ARCH=x64
 	;;
 arm64)
 	A=ARM64
@@ -20,6 +21,7 @@ arm64)
 	TRIVY_ARCH=ARM64
 	OC=linux-arm64
 	CLAUDE_PLATFORM=linux-arm64
+	NODE_ARCH=arm64
 	;;
 *)
 	echo "unsupported arch $TARGETARCH" >&2
@@ -207,6 +209,23 @@ codex)
 	# Codex writes state under $HOME when it runs. This stage's /root is not copied
 	# into the image.
 	/opt/codex/bin/codex --version >/dev/null
+	;;
+node)
+	# The official Linux binary tarball from nodejs.org, with npm and npx inside.
+	sh $F "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" sha256 "$(pin NODE_SHA256)" node.txz
+	mkdir -p /opt/node
+	# As root, tar would keep the archive's owner (uid 1001 for this tarball); the install
+	# must be root-owned.
+	tar --no-same-owner --strip-components=1 -xJf node.txz -C /opt/node
+	# Headers and docs are not needed to run node; keep LICENSE.
+	rm -rf /opt/node/include /opt/node/share /opt/node/README.md /opt/node/CHANGELOG.md
+	# npm's builtin config file, path/to/npm/itself/npmrc
+	# (https://docs.npmjs.com/cli/v11/configuring-npm/npmrc, "Built-in config file").
+	# sudo drops NPM_CONFIG_PREFIX, so root's global installs would go to /opt/node; this
+	# sends them to /usr/local. The agent user's NPM_CONFIG_PREFIX overrides it.
+	echo "prefix=/usr/local" >/opt/node/lib/node_modules/npm/npmrc
+	chown -R root:root /opt/node
+	/opt/node/bin/node --version >/dev/null
 	;;
 agy)
 	# The tarball named in versions.env; the binary inside is "antigravity" (install.sh).
