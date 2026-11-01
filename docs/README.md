@@ -16,6 +16,7 @@ Start with the [README](../README.md). [CONTRIBUTING.md](../CONTRIBUTING.md) cov
 | [browser-testing.md](browser-testing.md) | Optional Playwright setup, persistent browsers and execution checks |
 | [language-tooling.md](language-tooling.md) | Optional Go, Rust, Python and TypeScript language servers |
 | [plugins.md](plugins.md) | Optional plugins, RTK output filtering, context-mode indexing, Context7 and local Neuledge documentation lookup |
+| [extras.md](extras.md) | Optional Kandev, OpenChamber and REA installs with `agentainer-extras` |
 | [monitoring.md](monitoring.md) | Manual abtop session monitoring, snapshot output and model-call behavior |
 | [kubernetes.md](kubernetes.md) | The Kubernetes example with ContainerSSH |
 | [kelos.md](kelos.md) | The Kelos variant image: what it adds, building and testing it |
