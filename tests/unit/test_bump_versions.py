@@ -252,8 +252,65 @@ class SignatureTests(unittest.TestCase):
         with self.assertRaises(bv.LookupFailed):
             bv.verify_signature(self.data, self.sig["release"], keys, self.fpr["release"])
 
+    def test_any_key_in_the_set_may_sign(self):
+        keys = self.key["release"] + self.key["other"]
+        both = (self.fpr["release"], self.fpr["other"])
+        bv.verify_signature(self.data, self.sig["other"], keys, both)
+
+    def test_key_file_must_hold_exactly_the_set(self):
+        keys = self.key["release"] + self.key["other"]
+        with self.assertRaises(bv.LookupFailed):
+            bv.verify_signature(self.data, self.sig["release"], keys, (self.fpr["release"], "0" * 40))
+
+    def test_signature_by_a_key_outside_the_file_fails(self):
+        # gpg refuses it for lack of the public key, before the signer-in-set check runs.
+        keys = self.key["release"] + self.key["other"]
+        third = self.make_key("third")
+        sig = self.gpg("--local-user", third, "--detach-sign", "--output", "-", self.data_file)
+        with self.assertRaises(bv.LookupFailed):
+            bv.verify_signature(self.data, sig, keys, (self.fpr["release"], self.fpr["other"]))
+
+    def test_expired_key_is_refused_naming_expkeysig(self):
+        at = "20200101T000000!"
+        uid = "Test expired <expired@example.com>"
+        self.gpg("--faked-system-time", at, "--quick-gen-key", uid, "ed25519", "sign", "1d")
+        out = self.gpg("--with-colons", "--fingerprint", uid).decode()
+        fpr = [l.split(":")[9] for l in out.splitlines() if l.startswith("fpr")][0]
+        sig = self.gpg("--faked-system-time", at, "--local-user", fpr, "--detach-sign", "--output", "-",
+                       self.data_file)
+        with self.assertRaises(bv.LookupFailed) as ctx:
+            bv.verify_signature(self.data, sig, self.gpg("--armor", "--export", fpr), (fpr,))
+        self.assertIn("EXPKEYSIG", str(ctx.exception))
+
+    def test_signing_subkey_reports_its_primary(self):
+        # Some Node releasers sign with a subkey (release-keys README).
+        primary = self.make_key("withsub")
+        self.gpg("--quick-add-key", primary, "ed25519", "sign", "never")
+        sub = [l.split(":")[4] for l in self.gpg("--with-colons", "--list-keys", primary).decode().splitlines()
+               if l.startswith("sub")][0]
+        sig = self.gpg("--local-user", sub + "!", "--detach-sign", "--output", "-", self.data_file)
+        bv.verify_signature(self.data, sig, self.gpg("--armor", "--export", primary), (primary,))
+
+
+def primary_fingerprints(path):
+    """Primary key fingerprints of a key file, listed from a temporary GNUPGHOME."""
+    with tempfile.TemporaryDirectory() as home:
+        env = dict(os.environ, GNUPGHOME=home)
+        gpg = ["gpg", "--batch", "--no-tty"]
+        subprocess.run(gpg + ["--import", path], env=env, check=True, capture_output=True)
+        out = subprocess.run(gpg + ["--with-colons", "--fingerprint"], env=env, check=True,
+                             capture_output=True, text=True).stdout
+    lines = out.splitlines()
+    return [lines[i + 1].split(":")[9] for i, line in enumerate(lines)
+            if line.startswith("pub:") and i + 1 < len(lines) and lines[i + 1].startswith("fpr:")]
+
 
 class HelperTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
+    def test_node_keyring_holds_exactly_the_pinned_fingerprints(self):
+        # Imports NODE_KEYRING into a temporary GNUPGHOME and lists its primary fingerprints.
+        self.assertEqual(sorted(primary_fingerprints(bv.NODE_KEYRING)), sorted(bv.NODE_KEY_FINGERPRINTS))
+
     def test_codex_uses_the_complete_package_asset(self):
         self.assertEqual(bv.codex_asset("aarch64"), "codex-package-aarch64-unknown-linux-musl.tar.gz")
 
