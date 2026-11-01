@@ -1,10 +1,11 @@
 # Security
 
-To report a vulnerability in Agentainer itself, follow [SECURITY.md](../SECURITY.md).
+This page covers what the container isolates, agent permissions and vulnerability reports. To report a vulnerability in Agentainer itself, follow [SECURITY.md](../SECURITY.md).
 
 ## Contents
 
 - [What the container isolates](#what-the-container-isolates)
+  - [Credentials and runtime settings](#credentials-and-runtime-settings)
 - [Agent permissions](#agent-permissions)
 - [Vulnerability reports](#vulnerability-reports)
 
@@ -16,24 +17,29 @@ It does not isolate:
 
 - The code you mount. Agents can change or delete it.
 - Host execution of mounted files. Git configuration and hooks, generated executables, editor tasks and project scripts can run as your host user after an agent changes them. Review these files before running host commands, or use a separate host clone. Disabling Git hooks alone does not disable every execution path ([Git configuration](https://git-scm.com/docs/git-config)).
-- Host network services. On the tested macOS Podman machine, `host.containers.internal` reached a temporary service bound to host loopback. This does not establish the behavior of every runtime. Authenticate sensitive host services; use an offline network when network access is unnecessary ([Podman networking](https://docs.podman.io/en/latest/markdown/podman-run.1.html)).
+- Host network services. Whether container code can reach a service bound to host loopback depends on the runtime's networking; Podman, for example, provides `host.containers.internal` ([Podman networking](https://docs.podman.io/en/latest/markdown/podman-run.1.html)). Authenticate sensitive host services, and use an offline network when network access is unnecessary.
 - Shared home volumes. Every container using the same home trusts its shell startup files, agent settings and installed tools. Use different homes for different trust levels. Enabling sudo in a later container also grants its startup code access to container root.
 - Forwarded SSH agents. Processes with access to the socket can request signatures with its loaded keys. Use a dedicated agent with only the required keys. Keys with confirmation constraints can require host approval ([ssh-add](https://man.openbsd.org/ssh-add)).
 - Terminal output. Shells and attached panes send output to your host terminal. Arbitrary tmux passthrough is disabled by default. Enabling `allow-passthrough` in your own tmux configuration permits wrapped escape sequences to reach the outer terminal, including clipboard requests on terminals that accept them ([tmux manual](https://man.openbsd.org/tmux)).
 - Outbound network access, unless you use the NetworkPolicy in Kubernetes ([docs/kubernetes.md](kubernetes.md#network-policy)).
-- Credentials. **Every variable in the env file or Secret is readable by every process in the container**: all four agents, the tools they run, and MCP servers. Pass only the keys you need, and prefer narrowly scoped tokens.
+- Credentials. See [credentials and runtime settings](#credentials-and-runtime-settings).
 - The host kernel. This is a container, not a VM.
-- Everything inside the container once sudo is on ([docs/running.md](running.md#sudo)).
+- Everything inside the container once sudo is on ([sudo](running.md#sudo)).
 
-A raw image run has passwordless container sudo unless the runtime enables `no-new-privileges`. The launcher does so by default, and the Kubernetes example disables privilege escalation. Use the documented raw-run security option as well ([sudo](running.md#sudo)).
+The image runs as the non-root user `agent` (UID 1000), and agent binaries are root-owned. With sudo off, agents cannot replace them. A raw image run has passwordless sudo unless the runtime sets `no-new-privileges`. The launcher sets it by default, and the Kubernetes example disables privilege escalation. Add the option to raw runs too ([sudo](running.md#sudo)).
 
-The image runs as the non-root user `agent` (UID 1000), agent binaries are root-owned, and agents cannot update themselves while sudo is off.
+### Credentials and runtime settings
+
+- **Every variable in the env file or Secret is readable by every process in the container**: all four agents, the tools they run, and MCP servers. Pass only the keys you need, and prefer narrowly scoped tokens.
+- Env-file values stay in the engine's stored container configuration. Users with engine access can read them with `inspect`; on rootful Docker that includes members of the Docker group ([Podman inspect](https://docs.podman.io/en/latest/markdown/podman-inspect.1.html), [Docker env files](https://docs.docker.com/reference/cli/docker/container/run/#env)).
+- Changing the env file does not update an existing container, and stop and start do not refresh it. Recreate the container with `agentainer update` or `down` and `up`, and inspect leftover update backups before you remove them.
+- Agent update variables and `GOTOOLCHAIN=local` are defaults that container code can override. Root ownership is what stops ordinary replacement of image tools; sudo removes that protection. Go details are in [language tooling](language-tooling.md#go-with-gopls) ([Go toolchains](https://go.dev/doc/toolchain)).
 
 ## Agent permissions
 
 Agents keep their own approval prompts; the image turns on no skip-permissions mode. If you turn one on, note Anthropic's warning: "When executed with `--dangerously-skip-permissions`, dev containers do not prevent a malicious project from exfiltrating anything accessible inside the container, including the Claude Code credentials" ([devcontainer docs](https://code.claude.com/docs/en/devcontainer)).
 
-Codex's own sandbox is off (`sandbox_mode = "danger-full-access"` in the seeded `~/.codex/config.toml`). Its bubblewrap sandbox failed in the tested container with "bwrap: Can't mount devpts on /newroot/dev/pts: Permission denied", so the container provides the isolation. The seeded `approval_policy = "on-request"` permits approval requests; it does not require confirmation for every command. Codex can run commands against mounted files and use available network access without prompting. Treat every writable mount and supplied credential as accessible to it ([OpenAI approval semantics](https://learn.chatgpt.com/docs/agent-approvals-security)).
+Codex's own sandbox is off: the seeded `~/.codex/config.toml` sets `sandbox_mode = "danger-full-access"`, so the container provides the isolation. The file's comment gives the reason: Codex's bubblewrap sandbox cannot start inside a container ("bwrap: Can't mount devpts on /newroot/dev/pts: Permission denied"). Whether it starts under every runtime configuration is not verified. The seeded `approval_policy = "on-request"` lets Codex ask for approval; it does not require confirmation for every command. Codex can run commands against mounted files and use available network access without prompting. Treat every writable mount and supplied credential as accessible to it ([OpenAI approval semantics](https://learn.chatgpt.com/docs/agent-approvals-security)).
 
 Antigravity's terms say: "Wrapping `agy` inside third-party coding agents or applications ... is not supported under consumer plans" ([Antigravity FAQ](https://antigravity.google/docs/faq.md)). Agentainer installs `agy` for you to run yourself and does not wrap it.
 
@@ -48,7 +54,3 @@ CI scans candidate images and the exact pushed release digests with an independe
 - Kernel CVEs filed against `linux-libc-dev`, the kernel header package that C compilers need, are counted separately: the container runs on the host's kernel.
 
 Many findings sit in upstream binaries that this repo installs as released. They are fixed by upstream releases, which reach the image through the scheduled version update ([docs/versions.md](versions.md)). [AGENTS.md](../AGENTS.md#vulnerabilities-in-bundled-tools) describes how a tool that stops shipping fixes is handled.
-
-Env-file values remain in the engine's stored container configuration and are readable through inspect by users with engine access. On rootful Docker, that includes members of the Docker group. Rotating an env file does not update an existing container. Recreate it with `agentainer update` or down/up, and inspect leftover update backups before removing them. Stop/start alone does not refresh the stored environment ([Podman inspect](https://docs.podman.io/en/latest/markdown/podman-inspect.1.html), [Docker env files](https://docs.docker.com/reference/cli/docker/container/run/#env)).
-
-Image pins describe the initial image contents. Go defaults to `GOTOOLCHAIN=local`, which uses the bundled compiler and refuses projects requiring newer Go. Set `GOTOOLCHAIN=auto` explicitly to allow automatic selection and downloads. This default is advisory because container code can override it ([Go toolchains](https://go.dev/doc/toolchain)). Agent update environment variables are advisory and can be cleared by container code. Root ownership prevents ordinary binary replacement; enabling sudo permits replacement and other changes to image tools. A raw image run permits sudo unless the runtime restricts it.

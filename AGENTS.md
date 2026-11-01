@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rules for anyone changing this repository: AI coding agents and people. Claude Code, Codex, Antigravity CLI and OpenCode all read this file. Do not add a `CLAUDE.md`: Claude Code reads `AGENTS.md` only when no `CLAUDE.md` exists in the working directory or above it. [CONTRIBUTING.md](CONTRIBUTING.md) covers branches, CI and releases.
+Rules for anyone changing this repository: AI coding agents and people. Claude Code, Codex, Antigravity CLI and OpenCode all read this file. Do not add a `CLAUDE.md` at the repo root: by default, Claude Code reads `AGENTS.md` only when no `CLAUDE.md` exists in the working directory or above it ([Claude Code memory](https://code.claude.com/docs/en/memory)). The image's seeded `rootfs/etc/agentainer/home/.claude/CLAUDE.md` is a different file. [CONTRIBUTING.md](CONTRIBUTING.md) covers branches, CI and releases.
 
 ## What this repo is
 
@@ -17,6 +17,7 @@ Agentainer is one public container image that bundles four AI coding agents (Cla
 | `tests/` | Container tests (`NN-*.sh`), host tests (`host/`), unit tests (`unit/`), fixtures |
 | `docs/` | User documentation |
 | `.github/workflows/` | CI, release and the scheduled update |
+| `Containerfile.kelos`, `rootfs-kelos/`, `tests/kelos/` | The Kelos variant image, its files and its tests ([docs/kelos.md](docs/kelos.md)). Its pins live in `Containerfile.kelos`, not `versions.env`. CI does not build or test it. |
 
 `docs/private/` holds the maintainer's design notes, may be stale, and is ignored by git. Never commit anything under it.
 
@@ -38,6 +39,8 @@ python3 tests/host/test-layer-repro.py      # slow: two clean tool builds, confi
 python3 tests/host/test-healthcheck.py      # also invoked by tests/58-healthcheck.sh
 python3 tests/host/test-language-tooling.py --image localhost/agentainer:dev  # slow, network
 python3 tests/host/test-playwright-setup.py --image localhost/agentainer:dev  # slow, network
+scripts/build.sh --variant kelos [--from IMAGE]                 # build localhost/agentainer-kelos:dev; network
+IMAGE=localhost/agentainer-kelos:dev sh tests/kelos/test_image.sh
 # Release verification arguments: docs/versions.md#verifying-a-release-before-use
 # Optional terminal screenshots: tests/visual/README.md
 ```
@@ -72,7 +75,11 @@ Check each command's exit code directly. Piping into `tail` or `grep` hides a fa
 ## Image and runtime
 
 - Image-owned files live outside `/home/agent`. Initial, agent-owned `.profile` and `.bashrc` seed copies are the exception, so a newly created named home volume receives shell defaults. They become user files and startup does not replace them.
-- The entrypoint never replaces a user's file with the image's copy; it only adds files that are missing. Exceptions, each limited to what it manages: `~/.agentainer/AGENTS.md` follows a new image default when the user never edited it; `agentainer-mcp sync` edits only the MCP servers it added; `gh auth setup-git` and the git identity step write `~/.gitconfig`; the OpenCode step runs `opencode service set disabled true` only when `~/.config/opencode/service.json` does not exist yet, which creates that file.
+- The entrypoint never replaces a user's file with the image's copy; it only adds files that are missing. These exceptions each change only what they manage ([docs/running.md](docs/running.md#upgrading)):
+  - `~/.agentainer/AGENTS.md` is replaced with a new image default only when it is a regular file the user never edited and `release_version.py newer-default` finds the image's release version newer than every version that shipped the current content (`30-agents-md.sh`). Local `dev` builds never replace it.
+  - `agentainer-mcp sync` edits only the MCP servers recorded in `~/.agentainer/mcp-managed.json`.
+  - `gh auth setup-git` and the git identity step write `~/.gitconfig`.
+  - The OpenCode step runs `opencode service set disabled true` only when `~/.config/opencode/service.json` does not exist yet, which creates that file.
 - Containers may share one home volume. Anything that writes to it must cope with another container doing the same at the same time (unique temp files, `flock`).
 - Shell scripts are POSIX sh unless they need bash, and must pass `shellcheck` and `shfmt`. `/bin/sh` in the image is dash.
 

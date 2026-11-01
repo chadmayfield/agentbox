@@ -6,7 +6,7 @@
 - Namespace `containerssh`: the ContainerSSH server in [persistent mode](https://containerssh.io/v0.6/reference/kubernetes/#persistent-mode), and a small Python webhook that checks SSH public keys and tells ContainerSSH which pod to use. A NetworkPolicy lets only ContainerSSH reach the webhook, if your CNI enforces NetworkPolicy.
 - The ContainerSSH image on Docker Hub is amd64 only, so its Deployment runs on amd64 nodes. The agentainer pod runs on either architecture.
 
-This example has not been deployed to a cluster yet.
+Not verified: this example has not been deployed to a cluster.
 
 ## Contents
 
@@ -21,7 +21,7 @@ This example has not been deployed to a cluster yet.
 
 ## Install
 
-Before you apply, set `loadBalancerSourceRanges` in [`containerssh/service.yaml`](../deploy/kubernetes/containerssh/service.yaml) to your client range, block node ports with a firewall (see [SSH port access](#ssh-port-access)), and pin the image in [`agentainer/kustomization.yaml`](../deploy/kubernetes/agentainer/kustomization.yaml) (`images`, `newTag`). The example follows `latest`, which does not exist before the first stable release. Until then, select a published prerelease such as `0.1.0-dev.20261019.1` before applying these manifests ([release policy](versions.md#releases)).
+Before you apply, set `loadBalancerSourceRanges` in [`containerssh/service.yaml`](../deploy/kubernetes/containerssh/service.yaml) to your client range, block node ports with a firewall (see [SSH port access](#ssh-port-access)), and pin the image in [`agentainer/kustomization.yaml`](../deploy/kubernetes/agentainer/kustomization.yaml) (`images`, `newTag`). The example follows `latest`, which does not exist before the first stable release. Until then, set a published prerelease such as `0.1.0-dev.20261024.1` before applying these manifests ([release policy](versions.md#releases)).
 
 ```sh
 kubectl apply -f deploy/kubernetes/agentainer/namespace.yaml \
@@ -53,7 +53,7 @@ The agent pod has startup and readiness probes with a three-minute startup allow
 
 ## Limits
 
-- Each webhook request has a ten-second deadline covering headers and body. The webhook runs at most 16 handler threads and one deadline timer per handler. Excess connections receive HTTP 503. To preserve that response during an in-flight upload, it drains at most 16 rejected sockets without blocking or adding threads. Each drain has an 80 KiB byte budget and a one-second deadline checked by the server's polling loop. Further excess connections close immediately ([implementation](../deploy/kubernetes/auth-webhook/webhook.py), [HTTP connection teardown](https://www.rfc-editor.org/rfc/rfc9112.html#section-9.6)).
+- The webhook gives each request a ten-second deadline for headers and body. It runs at most 16 handler threads and answers further connections with HTTP 503 ([implementation](../deploy/kubernetes/auth-webhook/webhook.py)).
 - A cluster has no host folder. Clone repos into `/workspace`. **Work you have not pushed exists only on the workspace volume.**
 - sftp and the default `scp` do not work: since OpenSSH 9.0, `scp` uses the SFTP protocol, and the image has no `sftp-server`. `scp -O` (the legacy protocol) and `rsync -e ssh` should work, because ContainerSSH runs those as commands; this is not verified.
 - Port forwarding (`ssh -L`, `ssh -R`), socket forwarding and X11 forwarding are off: ContainerSSH disables them by default and the example keeps that.
@@ -81,7 +81,13 @@ Both keys are optional. [Configuration](configuration.md) describes both files; 
 
 ## Network policy
 
-[`agentainer/networkpolicy.yaml`](../deploy/kubernetes/agentainer/networkpolicy.yaml) allows the agent pod only DNS (port 53) and outbound TCP 443. Both UDP and TCP 53, and TCP 443, are allowed to every destination, including internal services and arbitrary DNS servers. This is a port restriction, not an internet-only allowlist. Restrict DNS selectors and pod/service/node ranges for the actual cluster before treating it as host or internal-service isolation. NetworkPolicy and address translation behavior depend on the CNI ([Kubernetes policy semantics](https://kubernetes.io/docs/concepts/services-networking/network-policies/)). It is off by default; add it to that folder's `kustomization.yaml` to use it, with a CNI that enforces NetworkPolicy. Without it, the agent pod can reach any address, including your cloud provider's instance metadata address (`169.254.169.254`) if the cluster allows it.
+[`agentainer/networkpolicy.yaml`](../deploy/kubernetes/agentainer/networkpolicy.yaml) limits the agent pod's outbound traffic.
+
+- Allowed: DNS on UDP and TCP port 53, and TCP port 443, to every destination, including internal services and any DNS server.
+- Not provided: an internet-only allowlist. This is a port restriction. Before you rely on it to isolate hosts or internal services, restrict the DNS selectors and the pod, service and node ranges for your cluster. NetworkPolicy and address translation behavior depend on the CNI ([Kubernetes policy semantics](https://kubernetes.io/docs/concepts/services-networking/network-policies/)).
+- Enabling it: the policy is off by default. Add it to that folder's `kustomization.yaml`, with a CNI that enforces NetworkPolicy.
+
+Without it, the agent pod can reach any address, including your cloud provider's instance metadata address (`169.254.169.254`) if the cluster allows it.
 
 ## Upgrading and removing
 
@@ -98,7 +104,7 @@ kubectl get namespace,statefulset,deployment,service,configmap,serviceaccount,ro
 
 ## More than one user
 
-Multi-user is a documented path, not built:
+The example serves one user. Multi-user support is not built; it would need these changes:
 
 - The webhook's `/config` answer would name a per-user pod such as `agentainer-<user>-0`.
 - Each user would get a StatefulSet and volumes, and `authorized_keys` would become a per-user mapping.

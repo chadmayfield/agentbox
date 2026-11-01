@@ -1,5 +1,7 @@
 # Running Agentainer with Podman or Docker
 
+This page covers the launcher, raw `docker run` and `podman run` commands, health checks, sudo, file ownership and upgrades.
+
 ## Contents
 
 - [The launcher](#the-launcher)
@@ -21,7 +23,7 @@
 | `agentainer attach [N]` | Runs `tmux new-session -A -s main` in the container |
 | `agentainer shell [N]` | Opens a bash login shell |
 | `agentainer start [N]` | Starts a stopped container, for example after the host or the Podman machine restarts |
-| `agentainer update [N]` | Pulls the image the container was created from and recreates the container with the same options |
+| `agentainer update [N]` | Pulls the image the container was created from and recreates the container with the same options ([upgrading](#upgrading)) |
 | `agentainer down [N]` | Removes a container carrying the Agentainer label. It refuses unrelated containers. The home volume stays. |
 | `agentainer status` | Lists agentainer containers |
 | `agentainer doctor [N] [--json]` | Runs offline diagnostics in the running container, without a TTY; see [diagnostic checks and exit codes](troubleshooting.md#offline-diagnostics). |
@@ -37,15 +39,13 @@ N defaults to `agentainer`. These variables override the launcher's defaults:
 
 For a host directory instead of the default named home volume, set `AGENTAINER_HOME_VOLUME` to an existing directory such as `"$HOME/.config/agentainer/home"`. Both mount at `/home/agent`. [Customizing Agentainer](customization.md) covers setup, your own dotfiles and separate test homes.
 
-`up` records its options (DIR, image, sudo setting, home volume, published ports and the env file's absolute path) as container labels, and `update` reads them back:
+Home sources containing `/`, or exactly `.` or `..`, are host paths. Other values are named volumes. Use `./myhome` for a relative directory rather than `myhome`. The launcher warns if a mount exposes the host home, a parent of it, or the host root. Choose a project directory to limit access.
 
-- `update` changes nothing when the pull fails, when DIR or the env file no longer exists, or when the container was not made by `up`.
-- After pulling, `update` renames the previous container to `cx-agentainer-backup-N` and stops it. It removes that backup only after replacement startup succeeds. A creation or startup failure restores the previous container and its running or stopped state. Home and workspace changes made by the replacement are not rolled back.
-- Startup may take up to 180 seconds. New images signal entrypoint completion; older images fall back to checking the tools link. If the launcher is killed before it can restore a failed update, inspect `cx-agentainer-backup-N` before retrying. It refuses to overwrite an existing backup. These operations use [Docker rename](https://docs.docker.com/reference/cli/docker/container/rename/) and [Podman rename](https://docs.podman.io/en/latest/markdown/podman-rename.1.html).
-- `update` pulls from a registry, so it cannot update a container that runs an image you built locally (`localhost/...`). Use `agentainer down` and `agentainer up --image ...` for those.
+Limits:
+
 - DIR must not contain `:`, because `-v` splits its value at `:`. Rename the directory to remove `:`.
-
-Home sources containing `/`, or exactly `.` or `..`, are host paths. Other values are named volumes. Use `./myhome` for a relative directory rather than `myhome`. The launcher warns if a mount exposes the host home, a parent of it, or the host root. Choose a project directory to limit access. Container names also serve as hostnames and must be at most 64 ASCII characters, starting with a letter or digit ([launcher](../bin/agentainer), [hostname limit](https://man7.org/linux/man-pages/man2/sethostname.2.html)).
+- Container names also serve as hostnames. They must be at most 64 ASCII characters and start with a letter or digit ([launcher](../bin/agentainer), [hostname limit](https://man7.org/linux/man-pages/man2/sethostname.2.html)).
+- `update` pulls from a registry, so it cannot update a container that runs an image you built locally (`localhost/...`). Use `agentainer down` and `agentainer up --image ...` for those.
 
 ## Development server ports
 
@@ -55,17 +55,25 @@ Repeat `--publish` or `-p` before DIR to publish development servers to the host
 bin/agentainer up --publish 3000:3000 --publish 8080:8000 "$HOME/code"
 ```
 
-Each mapping is `[IPv4:]HOST_PORT:CONTAINER_PORT[/tcp|udp]`. Omitting the address selects `127.0.0.1`, and omitting the protocol selects TCP. The example maps host ports 3000 and 8080 to container ports 3000 and 8000. Open `http://127.0.0.1:8080` on the host for a server listening on container port 8000. The server must listen on the container's network interface, for example `0.0.0.0`, rather than only its own loopback address ([Docker publishing](https://docs.docker.com/engine/network/port-publishing/), [Podman publishing](https://docs.podman.io/en/latest/markdown/podman-run.1.html)).
+This maps host ports 3000 and 8080 to container ports 3000 and 8000. Open `http://127.0.0.1:8080` on the host for a server on container port 8000. The server must listen on the container's network interface, for example `0.0.0.0`, not only on its own loopback address ([Docker publishing](https://docs.docker.com/engine/network/port-publishing/), [Podman publishing](https://docs.podman.io/en/latest/markdown/podman-run.1.html)).
 
-For UDP, use a mapping such as `--publish 5353:5353/udp`. An explicit bind address changes host access; `--publish 0.0.0.0:3000:3000` binds all host IPv4 interfaces. For a remote engine, the bind address belongs to the engine host. With a local VM, reachability also depends on the runtime's port forwarding.
+Each mapping is `[IPv4:]HOST_PORT:CONTAINER_PORT[/tcp|udp]`:
 
-The launcher accepts individual ports from 1 through 65535 and optional numeric IPv4 addresses. IPv6, port ranges and automatically assigned host ports require a direct runtime command. `--publish=3000:3000` and `-p3000:3000` are also accepted. It validates mappings before creating a container and validates recorded mappings before pulling an update. `update` keeps the mappings; a restored backup retains its own original mapping. Containers created by older launchers without a ports label continue to publish no ports.
+| Form | Example | Result |
+|---|---|---|
+| No address | `--publish 3000:3000` | Binds `127.0.0.1` on the host, TCP |
+| UDP | `--publish 5353:5353/udp` | UDP instead of TCP |
+| Explicit address | `--publish 0.0.0.0:3000:3000` | Binds all host IPv4 interfaces |
+| Joined forms | `--publish=3000:3000`, `-p3000:3000` | Accepted |
+| IPv6, port ranges, automatic host ports | | Not supported; use a direct runtime command |
 
-With no `--publish` option, the launcher publishes no ports. Change the mappings by recreating the container with the desired `up` options; the persistent home stays in place.
+Ports must be 1 through 65535. For a remote engine, the bind address belongs to the engine host. With a local VM, reachability also depends on the runtime's port forwarding.
+
+The launcher validates mappings before it creates a container and before it pulls an update. With no `--publish` option, it publishes no ports. `update` keeps the recorded mappings. Containers created by older launchers without a ports label publish no ports. To change the mappings, recreate the container with new `up` options; the home stays.
 
 ## Without the launcher
 
-Before the first stable release, replace `:latest` in the command below with an available prerelease tag, such as `:0.1.0-dev.20261019.1`. The registry has no `latest` manifest until a stable release publishes it ([release policy](versions.md#releases)).
+Use a published version tag. The registry has no `latest` manifest until a stable release publishes it ([release policy](versions.md#releases)).
 
 ```sh
 docker run -d --name agentainer --hostname agentainer \
@@ -74,7 +82,7 @@ docker run -d --name agentainer --hostname agentainer \
   -v agentainer-home:/home/agent \
   -v "$HOME/code:/workspace" -w /workspace \
   --env-file "$HOME/.config/agentainer/env" \
-  ghcr.io/chadmayfield/agentainer:latest
+  ghcr.io/chadmayfield/agentainer:0.1.0-dev.20261024.1
 docker exec -it agentainer tmux new-session -A -s main
 ```
 
@@ -86,13 +94,16 @@ With Podman, use the same commands and add `--userns=keep-id:uid=1000,gid=1000`.
 
 ## Container health
 
-The image defines [`agentainer-healthcheck`](../rootfs/usr/local/bin/agentainer-healthcheck) every 30 seconds, with a five-second timeout, a 180-second startup grace period and three consecutive failures before `unhealthy`. These settings use the [Dockerfile `HEALTHCHECK` instruction](https://docs.docker.com/reference/dockerfile/#healthcheck).
+The image runs [`agentainer-healthcheck`](../rootfs/usr/local/bin/agentainer-healthcheck) through the [Dockerfile `HEALTHCHECK` instruction](https://docs.docker.com/reference/dockerfile/#healthcheck):
 
-Podman inherits image health checks only from Docker-format manifests, as its [container creation source](https://github.com/containers/podman/blob/v5.3.2/pkg/specgen/generate/container.go#L67-L87) shows. `scripts/build.sh` uses Docker format with both engines. Local Docker builds disable default inline provenance because attestations require OCI manifests ([exporter options](https://docs.docker.com/build/exporters/image-registry/), [attestation options](https://docs.docker.com/build/metadata/attestations/)).
+| Setting | Value |
+|---|---|
+| Interval | 30 seconds |
+| Timeout | 5 seconds |
+| Start period | 180 seconds |
+| Retries before `unhealthy` | 3 |
 
-Release builds use a separate workflow with SBOM and provenance attestations. Podman does not inherit the health check from those OCI manifests. For a raw `podman run` with an image that includes this probe, supply `--health-cmd=/usr/local/bin/agentainer-healthcheck --health-interval=30s --health-timeout=5s --health-start-period=180s --health-retries=3` explicitly ([Podman options](https://docs.podman.io/en/v5.3.2/markdown/podman-run.1.html#health-cmd-command)). The launcher does not supply these overrides.
-
-The probe checks the entrypoint's completion marker, home-directory read/write/search permissions and the active tools symlink's readable, searchable directory target. Startup clears the previous marker, including after a container restart. The probe reads no agent settings or credentials, runs no agents, changes no home files and makes no network requests. It checks access permissions, not whether the disk has free space or every tool works. Use [`agentainer doctor`](troubleshooting.md#offline-diagnostics) for broader diagnostics.
+The probe checks the entrypoint's completion marker, read, write and search access to the home directory, and that the active tools symlink points to a readable, searchable directory. Startup clears the marker, including after a restart. The probe reads no agent settings or credentials, runs no agents, changes no home files and makes no network requests. It does not check free disk space or whether each tool works. [`agentainer doctor`](troubleshooting.md#offline-diagnostics) checks configuration syntax and that tools start; neither checks free space, so use `df -h` for that.
 
 Inspect the status and recent probe results from the host:
 
@@ -101,7 +112,16 @@ podman inspect --format '{{json .State.Health}}' agentainer
 docker inspect --format '{{json .State.Health}}' agentainer
 ```
 
-Health status reports readiness; it does not restart the container automatically. Docker ends startup grace after the first successful probe; Podman 5.3.2 continues suppressing failure counts until the grace deadline ([Podman source](https://github.com/containers/podman/blob/v5.3.2/libpod/healthcheck.go#L127-L136)). Older published images without this check require an image update and container recreation. Kubernetes does not use image health checks; pod probes must be configured separately ([Kubernetes probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)).
+Health status reports readiness. It does not restart the container. Kubernetes ignores image health checks; configure pod probes separately ([Kubernetes probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)).
+
+Podman inherits an image health check only from a Docker-format manifest ([Podman source](https://github.com/containers/podman/blob/v5.3.2/pkg/specgen/generate/container.go#L67-L87)). `scripts/build.sh` builds Docker format with both engines. Release images are OCI manifests with SBOM and provenance attestations, so a raw `podman run` of a release image needs the probe passed explicitly:
+
+```sh
+--health-cmd=/usr/local/bin/agentainer-healthcheck --health-interval=30s \
+--health-timeout=5s --health-start-period=180s --health-retries=3
+```
+
+The launcher does not add these options ([Podman options](https://docs.podman.io/en/v5.3.2/markdown/podman-run.1.html#health-cmd-command)). Older images without the probe need an image update and a new container. [Troubleshooting](troubleshooting.md#common-problems) covers Podman-specific health states.
 
 ## sudo
 
@@ -112,17 +132,25 @@ With sudo on, an agent can change anything in the container, including the agent
 ## File ownership
 
 - Rootless Podman with keep-id: files in `/workspace` belong to your host user.
-- Rootful Docker on Linux: files written to `/workspace` belong to UID 1000 on the host. If your UID is different, build your own image with `scripts/build.sh --uid "$(id -u)" --gid "$(id -g)"`, or use Podman or rootless Docker. With a GID other than 1000, also change the `ping_group_range` value to `"<gid> <gid>"` in your `run` command, or `ping` fails; the launcher always passes `1000 1000`.
+- Rootful Docker on Linux: files written to `/workspace` belong to UID 1000 on the host. If your UID is different, use Podman or rootless Docker, or build an image with your UID and GID.
+
+`scripts/build.sh` uses Podman unless `RUNTIME` says otherwise. On a Docker host:
+
+```sh
+RUNTIME=docker sh scripts/build.sh --uid "$(id -u)" --gid "$(id -g)"
+```
+
+With a GID other than 1000, also set `--sysctl "net.ipv4.ping_group_range=<gid> <gid>"` in your `run` command, or `ping` fails. The launcher always passes `1000 1000`.
+
+`sh tests/host/test-build-uid.sh` builds an image with `--uid 1001 --gid 20` and checks the agent user. When the build fails, it prints the last 80 lines of the build output.
 
 ## Other options
 
-A forwarded SSH agent lets container processes request signatures with its loaded keys. Use a dedicated agent containing only the keys required for this session. See [credential exposure](security.md#what-the-container-isolates).
-
-- SSH agent on a Linux host: add `-v "$SSH_AUTH_SOCK:/run/ssh-agent.sock" -e SSH_AUTH_SOCK=/run/ssh-agent.sock`. `ssh-agent` refuses a client whose UID differs from its own unless the client is root (`uid mismatch` in [ssh-agent.c](https://github.com/openssh/openssh-portable/blob/master/ssh-agent.c)), so the container user must have the UID of the user who started the agent:
+- SSH agent on a Linux host: add `-v "$SSH_AUTH_SOCK:/run/ssh-agent.sock" -e SSH_AUTH_SOCK=/run/ssh-agent.sock`. A forwarded agent lets container processes request signatures with its loaded keys, so use a dedicated agent holding only the keys this session needs ([credential exposure](security.md#what-the-container-isolates)). `ssh-agent` refuses a client whose UID differs from its own unless the client is root (`uid mismatch` in [ssh-agent.c](https://github.com/openssh/openssh-portable/blob/master/ssh-agent.c)), so the container user needs the UID of the user who started the agent:
   - Rootless Podman with keep-id, as the launcher runs it, maps your host UID to the container user ([podman-run](https://docs.podman.io/en/latest/markdown/podman-run.1.html)). Not verified with an SSH agent.
-  - Rootful Docker runs the container user as UID 1000. If your UID is different, build your own image with `--uid` as described in [File ownership](#file-ownership).
+  - Rootful Docker runs the container user as UID 1000. If your UID is different, build your own image as described in [File ownership](#file-ownership).
 
-  CI covers only rootful Docker on an Ubuntu runner. It starts `ssh-agent`, runs `chmod 755` on the socket's directory, and runs `ssh-add -l` as the image's entrypoint with `--user "$(id -u):$(id -g)"`, so the full entrypoint does not run in that check. On macOS the socket path depends on the runtime; this is not verified. For git, the default is `GH_TOKEN` ([docs/logins.md](logins.md)).
+  Verified in CI with rootful Docker on Linux only, in a narrow check: CI makes the socket's directory readable, then runs `ssh-add -l` as the entrypoint with `--user "$(id -u):$(id -g)"`, so the normal entrypoint does not run. Not verified: macOS, where the socket path depends on the runtime. For git, the default is `GH_TOKEN` ([logins](logins.md)).
 - SELinux hosts may need `:z` on volume mounts. Not verified.
 
 ## Upgrading
@@ -131,17 +159,31 @@ A forwarded SSH agent lets container processes request signatures with its loade
 bin/agentainer update
 ```
 
-`update` pulls the image the container was created from and recreates the container; the home volume stays. Without the launcher, pull first: a plain `run` does not pull a newer `latest` if an older one is already on your machine. For Kubernetes, see [docs/kubernetes.md](kubernetes.md#upgrading-and-removing).
+`update` pulls the image the container was created from and recreates the container; the home volume stays. Without the launcher, pull first: a plain `run` does not pull a newer image for a tag that is already on your machine. For Kubernetes, see [docs/kubernetes.md](kubernetes.md#upgrading-and-removing).
 
-On the first start of the new image, the entrypoint adds files that are missing from your home volume and does not replace your files with the image's copies. The exceptions are `~/.agentainer/AGENTS.md`, the MCP servers that `agentainer-mcp sync` added, `~/.gitconfig` and `~/.config/opencode/service.json`, as described below.
+How `update` works:
+
+- `up` records DIR, image, sudo setting, home volume, published ports and the env file's absolute path as container labels. `update` reads them back.
+- `update` changes nothing when the pull fails, when DIR or the env file no longer exists, or when the container has no option labels.
+- After the pull, `update` renames the old container to `cx-agentainer-backup-N` and stops it. It removes the backup only after the new container starts. If creation or startup fails, it restores the old container in its previous running or stopped state. Changes the new container made to the home or workspace are not rolled back.
+- Startup may take up to 180 seconds. The new container counts as started when the entrypoint's completion marker exists; for an older image without the marker, when its tools link exists. If the launcher is killed before it can restore a failed update, inspect `cx-agentainer-backup-N` before you retry. `update` refuses to overwrite an existing backup.
+- A successful `update` leaves the new container running, even when the old one was stopped.
+- `AGENTAINER_DRY_RUN=1` prints the commands that change state instead of running them. `update` and `down` still run read-only `inspect` calls to read the recorded options.
+
+On the first start of the new image, the entrypoint adds files that are missing from your home volume. It does not replace your files with the image's copies, with these exceptions. Each exception changes only the part the entrypoint manages:
+
+| File | What changes | When |
+|---|---|---|
+| `~/.agentainer/AGENTS.md` | Replaced with the new default | You never edited it and the image's version allows it; [AGENTS.md](configuration.md#agentsmd) lists the conditions |
+| Agent MCP configs | Servers that `agentainer-mcp sync` added | `~/.agentainer/mcp.json` changed, or you run `agentainer-mcp sync` ([MCP servers](configuration.md#mcp-servers)) |
+| `~/.gitconfig` | The GitHub credential helper, from `gh auth setup-git` | `GH_TOKEN` or `GITHUB_TOKEN` is set and this container's `gh` is not already the helper ([GitHub and Git](logins.md#github-and-git)) |
+| `~/.gitconfig` | `user.name` or `user.email` | `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` is set and the file has no value for it |
+| `~/.config/opencode/service.json` | Created by `opencode service set disabled true` | The file does not exist yet |
+
+Everything else:
 
 - Logins, agent settings and history stay.
-- When `GH_TOKEN` or `GITHUB_TOKEN` is set, `gh auth setup-git` writes the GitHub credential helper to `~/.gitconfig`, unless this container's `gh` is already the helper. When `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` is set and `~/.gitconfig` has no `user.name` or `user.email`, the entrypoint writes that value ([docs/logins.md](logins.md#github-and-git)).
-- The OpenCode step runs `opencode service set disabled true` once per home volume, which writes `~/.config/opencode/service.json`.
-- New defaults in the image's seed files do not reach an existing home. The image's copies are in `/etc/agentainer/home/` (for example `.claude/settings.json` and `.codex/config.toml`) if you want to compare them with yours.
-- `~/.agentainer/AGENTS.md` follows the new default only if you never edited it ([docs/configuration.md](configuration.md#agentsmd)).
-- With `AGENTAINER_TOOLS=persist`, tools you installed stay on `PATH` after the image's own tools. The entrypoint warns on each start until you run `agentainer-tools reset`, which moves them to a dated backup.
+- New defaults in the image's seed files do not reach an existing home. Compare yours with the image's copies in `/etc/agentainer/home/`, for example `.claude/settings.json` and `.codex/config.toml`.
+- With `AGENTAINER_TOOLS=persist`, tools you installed stay on `PATH` after the image's own tools ([tools that agents install](configuration.md#tools-that-agents-install)).
 - MCP servers sync again only when `~/.agentainer/mcp.json` changes. Run `agentainer-mcp sync` to sync after an upgrade.
 - Anything installed with `sudo apt install` is gone, as after every new container.
-
-A successful `update` leaves the replacement running, including when the previous container was stopped. Failed updates restore the previous running or stopped state. `AGENTAINER_DRY_RUN=1` prints commands instead of running mutations; update and down still perform real read-only engine inspections to obtain its recorded options. The trace shell-quotes arguments, including embedded single quotes ([launcher source](../bin/agentainer)).

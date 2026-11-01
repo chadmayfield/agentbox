@@ -1,10 +1,11 @@
 # Configuration
 
-[Default configuration](defaults.md) covers the seeded shell, Git, tmux, Vim, EditorConfig and agent settings. Existing user files are preserved.
+This page covers the shared `AGENTS.md`, MCP servers, tools that agents install, OpenRouter and startup messages. [Default configuration](defaults.md) covers the seeded shell, Git, tmux, Vim, EditorConfig and agent settings. Existing user files are preserved.
 
 ## Contents
 
 - [AGENTS.md](#agentsmd)
+  - [Writing rules](#writing-rules)
 - [MCP servers](#mcp-servers)
 - [Tools that agents install](#tools-that-agents-install)
 - [OpenRouter](#openrouter)
@@ -12,7 +13,7 @@
 
 ## AGENTS.md
 
-You keep one instruction file, `~/.agentainer/AGENTS.md`, and every agent reads it:
+You keep one instruction file, `~/.agentainer/AGENTS.md`. Agentainer connects each agent to it:
 
 | Agent | Reads | How |
 |---|---|---|
@@ -21,19 +22,24 @@ You keep one instruction file, `~/.agentainer/AGENTS.md`, and every agent reads 
 | Antigravity | `~/.gemini/AGENTS.md` | Symlink |
 | OpenCode | `~/.config/opencode/AGENTS.md` | Symlink |
 
-Claude Code is set to load both `CLAUDE.md` and `AGENTS.md` in a repo that has both ([instruction files setting](https://code.claude.com/docs/en/memory)). Each repo's own `AGENTS.md` still loads on top of yours. If a link path already holds a file of your own, the entrypoint leaves it and prints a warning.
+The entrypoint seeds `~/.claude/CLAUDE.md` and creates each symlink only when that path is missing. An existing `~/.claude/CLAUDE.md` is kept without a message. An existing regular file at one of the three symlink paths is kept with a warning. In both cases that agent reads the shared file only if your file imports or links it.
 
-The first start copies the image's default. When an image's default differs from your file:
+The seeded Claude settings set `instructionFiles` to `claude-md-and-agents-md`, so Claude Code loads both `CLAUDE.md` and `AGENTS.md` in a repo that has both ([instruction files setting](https://code.claude.com/docs/en/memory)). Each repo's own `AGENTS.md` still loads on top of yours.
 
-- The entrypoint replaces the file with the image's default only when all of these hold: you never edited the file (it still matches a default this home has seen), the image has a valid release version, and that version is newer than every recorded version that shipped the file's current content. A prerelease can update an older prerelease default but never a default associated with a stable release. It keeps the file mode and prints one line saying so. Release versions follow [SemVer](https://semver.org/), including dated development builds such as `0.1.0-dev.20261019.1`. The image sets the version in `AGENTAINER_IMAGE_VERSION`.
-- In every other case the file is not touched: you edited it, the image is older (for example another container on the same home volume runs an older image), the image is a prerelease and your default is associated with a stable release, or the image is a local build (`dev`). If the image's default is one this home has not seen before, the entrypoint prints one notice, and `agentainer-agents diff` shows the difference.
-- A symlinked `~/.agentainer/AGENTS.md`, for example from a dotfiles repo, is never replaced.
+The first start copies the image's default. A later image replaces your copy with its own default only when all of these hold:
 
-`~/.agentainer/agents-default.sha256` lists every default the home has seen, one line per default and image version: `<sha256> <version>`. A line with only a hash comes from an image that did not record its version and counts as older than any release. So an older image never rolls the file back, and two images that share one home volume do not report each other's default more than once.
+- You never edited the file. It still matches a default this home has seen.
+- The file is a regular file. A symlinked `~/.agentainer/AGENTS.md`, for example from a dotfiles repo, is never replaced.
+- The image has a release version (`AGENTAINER_IMAGE_VERSION`), not a local build (`dev`).
+- That version is newer than every recorded version that shipped your file's content. A prerelease can replace an older prerelease default, but never a default that a stable release shipped.
+
+Release versions follow [SemVer](https://semver.org/), including dated development builds such as `0.1.0-dev.20261019.1`. A replacement keeps the file mode and prints one line. In every other case the file is not touched. If the image's default is one this home has not seen before, the entrypoint prints one notice; `agentainer-agents diff` shows the difference.
+
+`~/.agentainer/agents-default.sha256` records every default the home has seen, one line per default and image version: `<sha256> <version>`. A line with only a hash comes from an image that did not record its version and counts as older than any release. So an older image never rolls the file back, and two images that share one home volume do not report each other's default more than once.
 
 ### Writing rules
 
-The shared default tells agents to read `/usr/local/share/agentainer/skills/unslop/SKILL.md` before writing covered text. This is one image-owned copy of [Cursor's unslop skill](https://github.com/cursor/plugins/tree/main/pstack/skills/unslop), accompanied by the upstream [MIT license and attribution](https://github.com/cursor/plugins/blob/main/pstack/LICENSE). The build verifies both files against the commit and SHA-256 values in [`versions.env`](../versions.env). Upstream publishes no checksum files for these sources; the updater computes the recorded hashes from the same immutable commit.
+The shared default tells agents to read `/usr/local/share/agentainer/skills/unslop/SKILL.md` before writing covered text. This is one image-owned copy of [Cursor's unslop skill](https://github.com/cursor/plugins/tree/main/pstack/skills/unslop), with the upstream [MIT license and attribution](https://github.com/cursor/plugins/blob/main/pstack/LICENSE). The build verifies both files against the commit and SHA-256 values in [`versions.env`](../versions.env). Upstream publishes no checksum files for these sources; the updater computes the recorded hashes from the same immutable commit.
 
 The shared instructions set this scope:
 
@@ -46,9 +52,9 @@ The shared instructions set this scope:
 | Generated output, lockfiles, generated code, config keys and values, test fixture data, quotations and code identifiers | Exempt |
 | Untouched text | Leave unchanged |
 
-Edit the writing section in `~/.agentainer/AGENTS.md` to customize or disable it. Existing edited instructions, custom agent files and local `dev` homes follow the preservation rules above. Compare the new section with `agentainer-agents diff` before adopting it in those homes.
+Edit the writing section in `~/.agentainer/AGENTS.md` to customize or disable it. Homes with edited instructions or a local `dev` image keep their copy; compare the new section with `agentainer-agents diff` before adopting it.
 
-Agentainer references the skill through shared instructions rather than registering a native `/unslop` command or installing the rest of pstack. The offline tests check the installed bytes, license, ownership and the reference in Codex's assembled prompt. Import and symlink checks cover how the shared instructions reach the other agents. Actual model adherence to the writing rules remains not verified.
+Agentainer references the skill through the shared instructions. It does not register a native `/unslop` command or install the rest of pstack. Whether models follow the writing rules is not verified.
 
 ## MCP servers
 
@@ -74,7 +80,19 @@ The sample fixes the package version using [published npm metadata](https://regi
 
 The JSON paths and formats match output from `claude mcp add-json --scope user` and `agy mcp add`, checked in the image. Claude documents its [user scope](https://code.claude.com/docs/en/mcp).
 
-The entrypoint runs the sync when `mcp.json` changes, and `agentainer-mcp list` shows what it manages. It adds, updates and removes only the servers it added and never touches servers you added yourself. Deleting `mcp.json` removes the servers it added. Config files that are symlinks stay symlinks; the sync writes the file the link points to. Direct syncs and startup syncs share one lock, so they run one at a time on a shared home volume. Startup uses `agentainer-mcp sync --if-changed`, which checks and records the input hash under that same lock; a direct `agentainer-mcp sync` runs even when the input has not changed. Failed writes leave no success stamp and retry on the next start. A journal records config hashes and managed names before each write, so a restart can recover ownership after an interrupted sync. If the config changed independently during that interruption, sync stops for inspection rather than claiming ownership.
+When the sync runs:
+
+- On container start, when `mcp.json` changed. Startup runs `agentainer-mcp sync --if-changed`.
+- When you run `agentainer-mcp sync`, even if `mcp.json` did not change.
+- A failed write leaves no success stamp, so the next start retries.
+
+Ownership:
+
+- `~/.agentainer/mcp-managed.json` records which servers the sync added, for all four agents. The sync adds, updates and removes only those servers and never touches servers you added yourself. `agentainer-mcp list` shows them.
+- Deleting `mcp.json` removes the servers the sync added.
+- Config files that are symlinks stay symlinks; the sync writes the file the link points to.
+- Direct and startup syncs share one lock, so they run one at a time on a shared home volume. The lock does not coordinate with agents that write the same files, so stop those agents before you sync.
+- A journal records config hashes and managed names before each write, so a restart can recover ownership after an interrupted sync. If the config changed during that interruption, the sync stops for inspection instead of claiming ownership.
 
 Server names may use only letters, digits, `-` and `_`. Any other name stops the sync with an error such as `agentainer-mcp: server name 'my.server' may only use letters, digits, - and _; nothing changed`.
 
@@ -87,23 +105,30 @@ A server entry has these keys:
 
 Any other `type` stops the sync with an error and changes nothing. Other keys, such as `cwd`, `timeout` or `disabled`, are not passed on; the sync prints a warning naming them.
 
+Keep secrets as `${NAME}` references to variables in your env file; no agent config receives the value. The sync writes literal values directly into agent config files and never passes server configuration to a child process. New config files have mode `0600`. Existing files keep their permissions unless a sync writes literal environment or header values; those writes remove group and other permissions.
+
 Limits per agent:
 
-- SSE servers reach Claude Code as SSE. Codex supports only streamable HTTP and Antigravity only `stdio` and `http`, so both leave an SSE server out with a warning. OpenCode gets it as a remote server, with a warning that this is not verified.
-- Keep secrets as `${NAME}` references to variables in your env file; no agent config receives the value. The sync writes literal values directly into agent config files and never passes server configuration to a child process. New config files have mode `0600`. Existing files keep their permissions unless a sync contains literal environment or header values; those config writes remove group and other permissions. Stop agents that write the same config files before syncing. The sync lock coordinates Agentainer syncs, not arbitrary agent writers.
-- Antigravity has no documented syntax for variable references. For `agy`, the sync leaves out `env` entries that are `${NAME}` references (the server inherits the container's environment instead) and does not write headers that contain `${NAME}`, such as `Authorization: Bearer ${TOKEN}`. It prints a warning for each; add those headers in Antigravity by hand.
-- Codex sends a `${NAME}` header variable as the whole header value. `Authorization: Bearer ${NAME}` works. For any other header written as `Bearer ${NAME}`, the sync leaves it out for Codex with a warning: store `Bearer <token>` in the variable and write the header value as `${NAME}`.
-- Codex passes a server only the variables named in its config, under their own names. An `env` entry such as `API_KEY=${OTHER}` cannot rename a variable for Codex, so the sync leaves it out with a warning; give the variable the name the server expects.
-- Codex rewrites `config.toml` itself. `codex plugin add` puts its tables between the marker comments, and `codex mcp add` can remove the first marker. The Codex sync handles this as follows:
-  - It finds its own servers by the names it recorded in `~/.agentainer/mcp-managed.json`. Only when that file lists no Codex servers, as in a config from an older Agentainer, does it take the servers between intact markers that `mcp.json` still lists.
-  - It keeps every other table and every comment, and writes its servers as a new marked block at the end.
-  - On its servers it owns the keys it can write: `command`, `args`, `env`, `env_vars`, `url`, `bearer_token_env_var`, `http_headers` and `env_http_headers`. If `config.toml` sets one of these on its server but `mcp.json` does not, the sync removes it and prints a warning. Put the value in `mcp.json` to keep it.
-  - Other keys you set on one of its servers, such as `enabled`, `enabled_tools` or `tools.<tool>.approval_mode` ([Codex config reference](https://learn.chatgpt.com/docs/config-file/config-reference)), stay with that server until you remove it from `mcp.json`.
-  - Before it writes, the sync parses the old and new file. If anything else would change, or `config.toml` is not valid TOML, it writes nothing, prints a warning and exits with status 1.
-- If `~/.config/opencode/opencode.jsonc` exists, the OpenCode sync stops with an error, because it edits only `opencode.json`.
-- For Claude Code, Antigravity and OpenCode, re-syncing replaces the servers it manages, so settings you change inside one of those agents for such a server may not survive.
+| Agent | SSE servers | `${NAME}` references |
+|---|---|---|
+| Claude Code | Written as SSE | Passed through |
+| Codex | Left out with a warning (streamable HTTP only) | `Authorization: Bearer ${NAME}` becomes `bearer_token_env_var`. Any other header must be `${NAME}` alone, with `Bearer <token>` stored in the variable. An `env` entry cannot rename a variable (`API_KEY=${OTHER}` is left out); give the variable the name the server expects. |
+| Antigravity | Left out with a warning (`stdio` and `http` only) | Not supported. `env` entries that are `${NAME}` are left out, so the server inherits the container's environment. Headers that contain `${NAME}` are left out with a warning. The next sync rewrites a server it manages, so add an authenticated server by hand under a name that `mcp.json` does not use ([agents](agents.md#mcp-servers-and-authentication)). |
+| OpenCode | Written as a remote server, with a warning that this is not verified | Written as `{env:NAME}` |
 
-In a hand check, Codex and Antigravity listed a synced server's tools, and `claude mcp list` reported the server as connected. OpenCode is not verified: `opencode mcp list` prints "No MCP servers configured" even for a server that `opencode mcp add` wrote itself.
+Codex rewrites `config.toml` itself. `codex plugin add` puts its tables between the marker comments, and `codex mcp add` can remove the first marker. The Codex sync handles this as follows:
+
+- It finds its own servers by the names recorded in `~/.agentainer/mcp-managed.json`. Only when that file lists no Codex servers, as in a config from an older Agentainer, does it take the servers between intact markers that `mcp.json` still lists.
+- It keeps every other table and every comment, and writes its servers as a new marked block at the end.
+- On its servers it owns the keys it can write: `command`, `args`, `env`, `env_vars`, `url`, `bearer_token_env_var`, `http_headers` and `env_http_headers`. If `config.toml` sets one of these on its server but `mcp.json` does not, the sync removes it and prints a warning. Put the value in `mcp.json` to keep it.
+- Other keys you set on one of its servers, such as `enabled`, `enabled_tools` or `tools.<tool>.approval_mode` ([Codex config reference](https://learn.chatgpt.com/docs/config-file/config-reference)), stay with that server until you remove it from `mcp.json`.
+- Before it writes, the sync parses the old and new file. If anything else would change, or `config.toml` is not valid TOML, it writes nothing, prints a warning and exits with status 1.
+
+For Claude Code, Antigravity and OpenCode, a sync replaces the servers it manages, so settings you change inside one of those agents for such a server may not survive. If `~/.config/opencode/opencode.jsonc` exists, the OpenCode sync stops with an error, because it edits only `opencode.json`.
+
+Verified by hand: Codex and Antigravity listed a synced server's tools, and `claude mcp list` reported it as connected. Not verified: OpenCode, whose `opencode mcp list` prints "No MCP servers configured" even for a server that `opencode mcp add` wrote itself.
+
+[Setting up the agents](agents.md#mcp-servers-and-authentication) covers each agent's own MCP login commands.
 
 ## Tools that agents install
 
@@ -114,7 +139,12 @@ In a hand check, Codex and Antigravity listed a synced server's tools, and `clau
 | `ephemeral` (default) | `/var/lib/agentainer/tools` | No |
 | `persist` | `~/.agentainer/tools` | Yes |
 
-Image tools come first on `PATH`, so an installed tool never hides an image tool. When the image changes and persisted tools exist, the entrypoint warns; `agentainer-tools reset` moves them to a dated backup. Resets share a lock and reserve unique backup paths across containers. `agentainer-tools status` shows the effective mode, selected root, and entries in `bin`, `npm/bin` and `python/bin`. It does not inventory every package or cache.
+- Set it in the runtime env file before you create the container. Changing it does not change an existing container's environment.
+- Image tools come first on `PATH`, so an installed tool never hides an image tool.
+- `persist` keeps the installation roots on the home volume. It does not record the install commands or reproduce the same versions in another home, so keep those in your own setup notes or a custom image.
+- It covers these user package managers only, not OS packages installed with `sudo apt`.
+- When the image changes and persisted tools exist, the entrypoint warns on each start. `agentainer-tools reset` moves all persisted roots (Go, npm, cargo, uv, pipx and the Python user base) to a dated backup. Resets share a lock and reserve unique backup paths across containers.
+- `agentainer-tools status` shows the effective mode, the selected root and the entries in `bin`, `npm/bin` and `python/bin`. It does not list every package or cache.
 
 Ubuntu's Python refuses `pip install` outside a virtual environment, `pip install --user` included (PEP 668), so use `uv`, `pipx` or a venv. `PYTHONUSERBASE` points into the same tools root, but plain `pip` never installs there.
 
