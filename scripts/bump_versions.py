@@ -609,8 +609,9 @@ EXTRA_MIN_AGE_DAYS = 7
 # prebuilds/linux-x64 and prebuilds/linux-arm64
 # (https://unpkg.com/node-pty@1.2.0-beta.15/?meta), and its install script
 # scripts/prebuild.js only checks that prebuilds/<platform>-<arch> exists
-# (https://unpkg.com/node-pty@1.2.0-beta.15/scripts/prebuild.js). rea installs
-# with --omit=optional, which leaves out frida.
+# (https://unpkg.com/node-pty@1.2.0-beta.15/scripts/prebuild.js). rea keeps
+# optional dependencies, so frida installs without running its install script
+# (npm ci --ignore-scripts).
 INSTALL_SCRIPT_ALLOWLIST = frozenset(("node-pty", "frida"))
 # Both keys from https://registry.npmjs.org/-/npm/v1/keys, copied verbatim on 2026-11-01.
 NPM_KEYS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys", "npm-registry-keys.json")
