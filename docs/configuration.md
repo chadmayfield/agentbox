@@ -68,7 +68,7 @@ The sample fixes the package version using [published npm metadata](https://regi
 | Agent | Where |
 |---|---|
 | Claude Code | `mcpServers` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json` |
-| Codex | A marked block in `~/.codex/config.toml` |
+| Codex | `[mcp_servers.<name>]` tables in a marked block at the end of `~/.codex/config.toml` |
 | Antigravity | `mcpServers` in `~/.gemini/config/mcp_config.json` |
 | OpenCode | `mcp.servers` in `~/.config/opencode/opencode.json` |
 
@@ -94,8 +94,14 @@ Limits per agent:
 - Antigravity has no documented syntax for variable references. For `agy`, the sync leaves out `env` entries that are `${NAME}` references (the server inherits the container's environment instead) and does not write headers that contain `${NAME}`, such as `Authorization: Bearer ${TOKEN}`. It prints a warning for each; add those headers in Antigravity by hand.
 - Codex sends a `${NAME}` header variable as the whole header value. `Authorization: Bearer ${NAME}` works. For any other header written as `Bearer ${NAME}`, the sync leaves it out for Codex with a warning: store `Bearer <token>` in the variable and write the header value as `${NAME}`.
 - Codex passes a server only the variables named in its config, under their own names. An `env` entry such as `API_KEY=${OTHER}` cannot rename a variable for Codex, so the sync leaves it out with a warning; give the variable the name the server expects.
+- Codex rewrites `config.toml` itself. `codex plugin add` puts its tables between the marker comments, and `codex mcp add` can remove the first marker. The Codex sync handles this as follows:
+  - It finds its own servers by the names it recorded in `~/.agentainer/mcp-managed.json`. Only when that file lists no Codex servers, as in a config from an older Agentainer, does it take the servers between intact markers that `mcp.json` still lists.
+  - It keeps every other table and every comment, and writes its servers as a new marked block at the end.
+  - On its servers it owns the keys it can write: `command`, `args`, `env`, `env_vars`, `url`, `bearer_token_env_var`, `http_headers` and `env_http_headers`. If `config.toml` sets one of these on its server but `mcp.json` does not, the sync removes it and prints a warning. Put the value in `mcp.json` to keep it.
+  - Other keys you set on one of its servers, such as `enabled`, `enabled_tools` or `tools.<tool>.approval_mode` ([Codex config reference](https://learn.chatgpt.com/docs/config-file/config-reference)), stay with that server until you remove it from `mcp.json`.
+  - Before it writes, the sync parses the old and new file. If anything else would change, or `config.toml` is not valid TOML, it writes nothing, prints a warning and exits with status 1.
 - If `~/.config/opencode/opencode.jsonc` exists, the OpenCode sync stops with an error, because it edits only `opencode.json`.
-- Re-syncing replaces the servers it manages, so settings you change inside an agent for one of them may not survive.
+- For Claude Code, Antigravity and OpenCode, re-syncing replaces the servers it manages, so settings you change inside one of those agents for such a server may not survive.
 
 In a hand check, Codex and Antigravity listed a synced server's tools, and `claude mcp list` reported the server as connected. OpenCode is not verified: `opencode mcp list` prints "No MCP servers configured" even for a server that `opencode mcp add` wrote itself.
 

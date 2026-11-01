@@ -95,6 +95,52 @@ assert_eq "the waiting sync finished after the release" "0" "$("$RUNTIME" wait "
 "$RUNTIME" rm -f "$lockname" "$syncname" >/dev/null 2>&1
 assert_contains "the waiting sync still ran" "claude: w" "$(run_in $H --network none -- agentainer-mcp list 2>/dev/null)"
 
+# Codex rewrites config.toml: "codex plugin add" puts its tables between our markers and
+# "codex mcp add" drops the begin marker. A later sync must keep both. A fresh volume
+# keeps our block at the end of the file, where Codex puts its new tables inside it.
+# Codex records the marketplace path, so every container mounts the fixture at /fx.
+"$RUNTIME" volume rm -f "$VOL" >/dev/null
+"$RUNTIME" volume create "$VOL" >/dev/null
+FX="$repo/tests/fixtures/codex-marketplace:/fx:ro"
+run_in $H --entrypoint sh -- -c 'mkdir -p ~/.agentainer && printf "%s" "{\"mcpServers\":{\"w\":{\"url\":\"https://mcp.example.com/a\"}}}" > ~/.agentainer/mcp.json' >/dev/null
+installed='codex plugin list --json | python3 -c "import json, sys; print(\"installed:\", *[p[\"pluginId\"] for p in json.load(sys.stdin)[\"installed\"] if p[\"installed\"]])"'
+# Where Codex put things relative to our markers, to prove the case this test needs.
+layout() {
+	run_in $H --network none --entrypoint python3 -- -c 'import pathlib
+t = pathlib.Path.home().joinpath(".codex/config.toml").read_text()
+b, e = t.find("# >>> agentainer-mcp"), t.find("# <<< agentainer-mcp <<<")
+inside = lambda s: 0 <= t.find(s) < e and t.find(s) > b
+print("begin=%d plugin-inside=%s mine-before-end=%s" % (t.count("# >>> agentainer-mcp"), inside("[plugins."), 0 <= t.find("[mcp_servers.mine]") < e))' 2>&1
+}
+out=$(run_in $H -v "$FX" --network none -- sh -c "codex plugin marketplace add /fx/fixture-market && codex plugin add fixture-plugin@fixture-market --json >/dev/null && $installed" 2>&1)
+assert_contains "codex installs a plugin from the offline fixture" "installed: fixture-plugin@fixture-market" "$out"
+assert_contains "codex put its plugin tables inside our block" "begin=1 plugin-inside=True" "$(layout)"
+run_in $H --entrypoint sh -- -c 'printf "%s" "{\"mcpServers\":{\"w\":{\"url\":\"https://mcp.example.com/b\"}}}" > ~/.agentainer/mcp.json' >/dev/null
+# The entrypoint syncs the changed mcp.json first; a direct sync runs again on the same input.
+out=$(run_in $H -v "$FX" --network none -- sh -c "agentainer-mcp sync; echo sync=\$?; $installed; codex mcp list" 2>&1)
+assert_contains "the sync after codex plugin add succeeds" "sync=0" "$out"
+assert_contains "the Codex plugin survives the sync" "installed: fixture-plugin@fixture-market" "$out"
+assert_contains "codex has the updated managed server" "https://mcp.example.com/b" "$out"
+# Then a server added with "codex mcp add", which removes the begin marker.
+run_in $H -v "$FX" --network none -- sh -c 'codex mcp add mine -- echo hi' >/dev/null 2>&1
+assert_contains "codex mcp add removed the begin marker" "begin=0" "$(layout)"
+assert_contains "codex put the user's server before the end marker" "mine-before-end=True" "$(layout)"
+run_in $H --entrypoint sh -- -c 'printf "%s" "{\"mcpServers\":{\"w\":{\"url\":\"https://mcp.example.com/c\"}}}" > ~/.agentainer/mcp.json' >/dev/null
+out=$(run_in $H -v "$FX" --network none -- sh -c "agentainer-mcp sync; echo sync=\$?; $installed; codex mcp list" 2>&1)
+assert_contains "the sync after codex mcp add succeeds" "sync=0" "$out"
+assert_contains "the plugin survives the second sync" "installed: fixture-plugin@fixture-market" "$out"
+assert_contains "the user's codex mcp add server survives" "mine " "$out"
+assert_contains "codex has the managed server's second update" "https://mcp.example.com/c" "$out"
+out=$(run_in $H --network none --entrypoint python3 -- -c 'import pathlib, tomllib
+t = pathlib.Path.home().joinpath(".codex/config.toml").read_text()
+b, e = "# >>> agentainer-mcp", "# <<< agentainer-mcp <<<"
+block = t[t.index(b):t.index(e)]
+d = tomllib.loads(t)
+print("markers:", t.count(b), t.count(e), "in-block:", "[plugins." in block, "[marketplaces." in block, "[mcp_servers.mine]" in block,
+      "servers:", sorted(d["mcp_servers"]), "plugin:", d["plugins"]["fixture-plugin@fixture-market"]["enabled"])' 2>&1)
+assert_eq "codex tables sit outside one marker pair" \
+	"markers: 1 1 in-block: False False False servers: ['mine', 'w'] plugin: True" "$out"
+
 # A malformed file keeps the container up.
 assert_contains "malformed file keeps the container up" "ok" \
 	"$(run_in $H --entrypoint sh -- -c 'echo "{bad" > ~/.agentainer/mcp.json; agentainer-entrypoint echo ok 2>/dev/null')"
