@@ -1,0 +1,343 @@
+#!/bin/sh
+# agentainer-extras list | install NAME... | remove NAME...
+# Installs optional npm tools from the image's catalog into the active tools root. Each
+# install runs npm ci from the catalog's lockfile with install scripts off.
+# Exit codes: 0 success, 1 a failed install or remove, 2 a usage error or an unknown name.
+set -eu
+catalog=/usr/local/share/agentainer/extras
+active=/var/lib/agentainer/active
+ephemeral_root=/var/lib/agentainer/tools
+ext=$active/npm/extras
+prog=agentainer-extras
+name=''
+new=''
+cache=''
+logs=''
+created=''
+tmplink=''
+
+err() { printf '%s: %s\n' "$prog" "$*" >&2; }
+info() { printf '%s: %s\n' "$prog" "$*"; }
+usage() {
+	echo "usage: $prog list | install NAME... | remove NAME..." >&2
+	exit 2
+}
+
+# Removes the temp cache, the npm log directory unless a failure kept it, a temp link not yet
+# renamed into place, and an install directory that was never linked together with the bin
+# links made for it.
+cleanup() {
+	if [ -n "$tmplink" ]; then rm -f "$tmplink"; fi
+	if [ -n "$cache" ]; then rm -rf "$cache"; fi
+	if [ -n "$logs" ]; then rm -rf "$logs"; fi
+	if [ -n "$new" ] && [ "$(readlink "$ext/$name" 2>/dev/null)" != "${new##*/}" ]; then
+		rm -rf "$new"
+		set -f
+		for l in $created; do rm -f "$l"; done
+		set +f
+	fi
+	cache='' logs='' new='' created='' tmplink=''
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+catalog_names() {
+	for d in "$catalog"/*/; do
+		if [ -f "${d}extra.conf" ]; then basename "$d"; fi
+	done
+}
+
+valid_name() {
+	case $1 in
+	'' | .* | *[!A-Za-z0-9._-]*) return 1 ;;
+	esac
+}
+
+in_catalog() {
+	valid_name "$1" && [ -f "$catalog/$1/extra.conf" ] && [ -f "$catalog/$1/package.json" ] &&
+		[ -f "$catalog/$1/package-lock.json" ]
+}
+
+# load NAME: reads the entry's six settings in a child shell, so extra.conf sets nothing in
+# this one, then checks them and reads the pinned version from the wrapper package.json.
+# The child shell expands $(...) and backticks in values; the catalog is part of the image.
+load() {
+	f=$catalog/$1/extra.conf
+	if grep -Evq '^[[:space:]]*(#.*)?$|^(package|description|bins|omit_optional|check|notes)=' "$f"; then
+		err "$1: $f may set only package, description, bins, omit_optional, check and notes"
+		return 1
+	fi
+	# shellcheck disable=SC2016 # the script expands in the child shell
+	vals=$(sh -c '
+		. "$1" >/dev/null || exit 1
+		for v in "${package-}" "${description-}" "${bins-}" "${omit_optional-}" "${check-}" "${notes-}"; do
+			case $v in *"
+"*) exit 1 ;; esac
+		done
+		printf "%s\n" "${package-}" "${description-}" "${bins-}" "${omit_optional:-no}" "${check-}" "${notes-}"
+	' sh "$f") || {
+		err "$1: cannot read $f, or a value in it spans more than one line"
+		return 1
+	}
+	package=$(printf '%s\n' "$vals" | sed -n 1p)
+	description=$(printf '%s\n' "$vals" | sed -n 2p)
+	bins=$(printf '%s\n' "$vals" | sed -n 3p)
+	omit_optional=$(printf '%s\n' "$vals" | sed -n 4p)
+	check=$(printf '%s\n' "$vals" | sed -n 5p)
+	notes=$(printf '%s\n' "$vals" | sed -n 6p)
+	if ! printf '%s\n' "$package" | grep -Eq '^(@[a-z0-9~-][a-z0-9._~-]*/)?[a-z0-9~-][a-z0-9._~-]*$'; then
+		err "$1: package '$package' in $f is not an npm package name"
+		return 1
+	fi
+	case $omit_optional in
+	yes | no) ;;
+	*)
+		err "$1: omit_optional in $f must be yes or no"
+		return 1
+		;;
+	esac
+	set -f
+	for b in $bins; do
+		if ! valid_name "$b"; then
+			set +f
+			err "$1: bin '$b' in $f is not a valid file name"
+			return 1
+		fi
+	done
+	set +f
+	pin=$(node -p 'require(process.argv[1]).dependencies[process.argv[2]] || ""' \
+		"$catalog/$1/package.json" "$package" 2>/dev/null) || pin=''
+}
+
+# installed_version NAME: prints the version under the NAME link, or nothing. Needs load.
+installed_version() {
+	f=$ext/$1/node_modules/$package/package.json
+	if [ -f "$f" ]; then node -p 'require(process.argv[1]).version' "$f" 2>/dev/null || true; fi
+}
+
+ephemeral_mode() { [ "$(readlink "$active")" = "$ephemeral_root" ]; }
+
+# lock_wait FD PATH: takes the lock on FD, saying what it waits for when it is not free soon.
+lock_wait() {
+	if ! flock -w 5 "$1"; then
+		err "waiting for $2, held by another agentainer-extras install or remove, or by agentainer-tools reset"
+		flock "$1"
+	fi
+}
+
+# open_lock FD PATH: opens PATH on FD. A failed exec redirection would end the shell with
+# status 2, the usage-error code, so the file is opened once with a regular builtin first.
+open_lock() {
+	if ! { true >>"$2"; } 2>/dev/null; then
+		err "cannot open the lock file $2"
+		exit 1
+	fi
+	case $1 in
+	8) exec 8>"$2" ;;
+	9) exec 9>"$2" ;;
+	esac
+}
+
+# Any root other than the image's ephemeral one can be moved by agentainer-tools reset, which
+# takes .tools-reset.lock next to that root. That lock comes first, so a reset cannot move the
+# root during an install. The extras lock serializes containers that share one root.
+take_locks() {
+	root=$(readlink "$active")
+	if [ "$root" != "$ephemeral_root" ]; then
+		reset_lock=$(dirname "$root")/.tools-reset.lock
+		open_lock 8 "$reset_lock"
+		lock_wait 8 "$reset_lock"
+	fi
+	mkdir -p "$ext" "$active/npm/bin"
+	open_lock 9 "$active/npm/.extras.lock"
+	lock_wait 9 "$active/npm/.extras.lock"
+}
+
+list() {
+	printf '%-20s %-12s %-20s %s\n' NAME PINNED INSTALLED DESCRIPTION
+	for n in $(catalog_names); do
+		if ! load "$n"; then
+			printf '%-20s %-12s %-20s %s\n' "$n" '?' '?' 'invalid catalog entry'
+			continue
+		fi
+		inst=$(installed_version "$n")
+		if [ -z "$inst" ]; then
+			inst=-
+		elif [ "$inst" != "$pin" ]; then
+			inst="$inst (outdated)"
+		fi
+		printf '%-20s %-12s %-20s %s\n' "$n" "${pin:-?}" "$inst" "$description"
+	done
+}
+
+# install_one NAME: installs NAME into a new versioned directory and links it. Any failure
+# before the NAME link switch removes the new directory and the bin links this run made,
+# and leaves the previous install as it was.
+install_one() {
+	name=$1
+	load "$name" || return 1
+	case $pin in
+	'' | *[!A-Za-z0-9.+-]*)
+		err "$name: $catalog/$name/package.json has no exact version for $package"
+		return 1
+		;;
+	esac
+	set -f
+	for b in $bins; do
+		link=$active/npm/bin/$b
+		if { [ -e "$link" ] || [ -L "$link" ]; } &&
+			[ "$(readlink "$link" 2>/dev/null)" != "../extras/$name/node_modules/.bin/$b" ]; then
+			set +f
+			err "$name: $link already exists and is not a link into extras/$name; move it aside and run install again"
+			return 1
+		fi
+	done
+	set +f
+	previous=$(readlink "$ext/$name" 2>/dev/null) || previous=''
+
+	new=$(mktemp -d "$ext/$name@$pin.XXXXXX") || {
+		new=''
+		err "$name: cannot create a directory in $ext"
+		return 1
+	}
+	if ! { cache=$(mktemp -d) && logs=$(mktemp -d) && chmod 0755 "$new"; }; then
+		cleanup
+		err "$name: cannot create temporary directories"
+		return 1
+	fi
+	if [ "$omit_optional" = yes ]; then optional=--omit=optional; else optional=--include=optional; fi
+	info "$name: installing $package@$pin"
+	if ! cp "$catalog/$name/package.json" "$catalog/$name/package-lock.json" "$new/" ||
+		! (cd "$new" && npm ci --ignore-scripts --no-audit --no-fund --cache "$cache" --logs-dir "$logs" "$optional" >&2); then
+		err "$name: npm ci failed; the previous install is unchanged. npm's log is in $logs"
+		logs=''
+		cleanup
+		return 1
+	fi
+	rm -rf "$cache"
+	cache=''
+
+	got=$(node -p 'require(process.argv[1]).version' "$new/node_modules/$package/package.json" 2>/dev/null) || got=''
+	if [ "$got" != "$pin" ]; then
+		cleanup
+		err "$name: npm installed $package ${got:-with no version}, expected $pin; the previous install is unchanged"
+		return 1
+	fi
+	if [ -n "$check" ] && ! (cd "$new" && sh -c "$check" </dev/null) >&2; then
+		cleanup
+		err "$name: the check '$check' failed; the previous install is unchanged"
+		return 1
+	fi
+	set -f
+	for b in $bins; do
+		if [ ! -e "$new/node_modules/.bin/$b" ]; then
+			set +f
+			cleanup
+			err "$name: $package has no bin named $b; the previous install is unchanged"
+			return 1
+		fi
+	done
+
+	# Bin links go through the NAME link, so an upgrade changes only that link. Its target is
+	# a bare directory name because the root path differs per container and moves on reset.
+	for b in $bins; do
+		link=$active/npm/bin/$b
+		if [ -L "$link" ]; then continue; fi
+		tmplink=$link.tmp.$$
+		if ! { ln -sfn "../extras/$name/node_modules/.bin/$b" "$tmplink" && mv -T "$tmplink" "$link"; }; then
+			set +f
+			cleanup
+			err "$name: cannot create $link"
+			return 1
+		fi
+		tmplink=''
+		created="$created $link"
+	done
+	set +f
+	dir=${new##*/}
+	tmplink=$ext/.$name.tmp.$$
+	if ! { ln -sfn "$dir" "$tmplink" && mv -T "$tmplink" "$ext/$name"; }; then
+		cleanup
+		err "$name: cannot link $ext/$name; the previous install is unchanged"
+		return 1
+	fi
+	tmplink='' new='' created=''
+	rm -rf "$logs"
+	logs=''
+
+	# Keep the version just replaced, which another container may still run, and remove older ones.
+	for d in "$ext/$name@"*; do
+		[ -d "$d" ] || continue
+		b=${d##*/}
+		if [ "$b" != "$dir" ] && [ "$b" != "$previous" ]; then rm -rf "$d"; fi
+	done
+	info "$name: installed $package@$pin"
+	if [ -n "$notes" ]; then printf '%s\n' "$notes"; fi
+	if ephemeral_mode; then
+		info "$name is in this container's tools root ($ephemeral_root) and is gone when the container is replaced. To keep extras, start the container with AGENTAINER_TOOLS=persist and install again."
+	fi
+}
+
+remove_one() {
+	name=$1
+	if [ ! -L "$ext/$name" ] && ! ls -d "$ext/$name@"* >/dev/null 2>&1; then
+		info "$name is not installed"
+		return 0
+	fi
+	for link in "$active/npm/bin"/*; do
+		[ -L "$link" ] || continue
+		case $(readlink "$link") in
+		"../extras/$name/"*) rm -f "$link" || return 1 ;;
+		esac
+	done
+	if ! { rm -f "$ext/$name" && rm -rf "$ext/$name@"*; }; then
+		err "$name: cannot remove its files from $ext"
+		return 1
+	fi
+	info "$name: removed. Files it created outside $ext, such as its data directory or settings in your home, were left in place."
+}
+
+[ "$#" -ge 1 ] || usage
+cmd=$1
+shift
+case $cmd in
+list) [ "$#" -eq 0 ] || usage ;;
+install | remove) [ "$#" -ge 1 ] || usage ;;
+*) usage ;;
+esac
+if [ ! -L "$active" ] || [ ! -d "$active" ]; then
+	err "$active is not a link to a tools root. The agentainer entrypoint links it at start; this container started without the entrypoint or runs as a user with its own npm prefix."
+	exit 1
+fi
+if [ "$cmd" = list ]; then
+	list
+	exit 0
+fi
+
+# Check every name before changing anything. remove also accepts a name absent from the
+# catalog that has a link or versioned directories in the tools root.
+unknown=''
+for n; do
+	if in_catalog "$n"; then continue; fi
+	if [ "$cmd" = remove ] && valid_name "$n" &&
+		{ [ -L "$ext/$n" ] || ls -d "$ext/$n@"* >/dev/null 2>&1; }; then
+		continue
+	fi
+	unknown="$unknown $n"
+done
+if [ -n "$unknown" ]; then
+	err "unknown extra:$unknown"
+	err "valid names: $(catalog_names | tr '\n' ' ')"
+	exit 2
+fi
+
+take_locks
+status=0
+for n; do
+	if [ "$cmd" = install ]; then
+		install_one "$n" || status=1
+	else
+		remove_one "$n" || status=1
+	fi
+done
+exit "$status"
