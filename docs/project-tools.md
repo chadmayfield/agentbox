@@ -79,7 +79,9 @@ npm test
 
 `npm ci` requires the lockfile to agree with `package.json`, replaces `node_modules` and leaves the dependency declarations and lockfile unchanged. Use `npm install` for deliberate dependency changes. Keep any project-specific install flags in the project's configuration so local and CI installs agree ([npm ci](https://docs.npmjs.com/cli/v9/commands/npm-ci/)).
 
-The `packageManager` field records the project's expected package-manager version. Running plain `npm` uses the executable on `PATH`; the field alone does not switch it. Check `npm --version` against the project's requirement. The Corepack README says Node.js distributed Corepack "up to (but not including) 25.0.0" ([Corepack README](https://github.com/nodejs/corepack#readme)). The image's Node.js 26 does not include it. `tar -tf node-v<NODE_VERSION>-linux-x64.tar.xz` lists no corepack entry (`NODE_VERSION` is the pin in `versions.env`). To use pnpm or Yarn, install it the way the project documents. Alternatively, run `npm install -g corepack` and then `corepack enable` (same README). Follow an existing pnpm or Yarn project's setup rather than creating an npm lockfile beside its own lockfile.
+The `packageManager` field records the project's expected package-manager version. Running plain `npm` uses the executable on `PATH`; the field alone does not switch it. Check `npm --version` against the project's requirement.
+
+Node.js 26 does not include Corepack; Node.js shipped it only "up to (but not including) 25.0.0" ([Corepack README](https://github.com/nodejs/corepack#readme)). To use pnpm or Yarn, install it the way the project documents, or run `npm install -g corepack` and then `corepack enable` (same README). Follow an existing pnpm or Yarn project's setup rather than creating an npm lockfile beside its own lockfile.
 
 ## Language servers
 
@@ -102,7 +104,11 @@ cmake --build build
 
 Native addons build through `node-gyp`, which downloads the development files (headers) for the target Node.js version. `--devdir` sets the download directory, and the default is the OS cache directory. `--tarball` takes the headers from a local tarball ([node-gyp README](https://github.com/nodejs/node-gyp#readme)). That README does not say when the download happens or how to build offline with the image's Node.js; not verified.
 
-Earlier images installed Node.js from apt, and those packages put `eslint`, `webpack`, `terser`, `node-gyp`, `gyp` and `corepack` on `PATH` (checked with `command -v` in image 0.1.0-dev.20261024.1, which has Node.js 22.22.1). The image no longer ships them. A project runs its own copies through `npm install` and `npx`. npm installs native addons with the `node-gyp` bundled in npm itself (the version in `/opt/node/lib/node_modules/npm/node_modules/node-gyp/package.json`), so addon builds in `npm install` need no separate `node-gyp`. For Corepack, see the paragraph on `packageManager` above. `sudo npm install -g npm` replaces npm with a copy that lacks the image's builtin config, so root's global prefix then falls back to `/opt/node`, whose `bin` directory is not on `PATH`.
+The image installs Node.js from nodejs.org into `/opt/node` and has no `eslint`, `webpack`, `terser`, `node-gyp`, `gyp` or `corepack` command on `PATH`. A project runs its own copies through `npm install` and `npx`. npm builds native addons with the `node-gyp` bundled in npm itself (`/opt/node/lib/node_modules/npm/node_modules/node-gyp/`), so `npm install` needs no separate `node-gyp`.
+
+Do not run `sudo npm install -g npm`. It replaces npm with a copy that lacks the image's builtin config, so root's global prefix falls back to `/opt/node`, whose `bin` directory is not on `PATH`.
+
+Images up to `0.1.0-dev.20261024.1` installed Node.js from Ubuntu's `nodejs` and `npm` packages (`git show v0.1.0-dev.20261024.1:build/apt-packages.txt`). Projects that relied on commands from those packages must install them themselves.
 
 pkg-config reads installed `.pc` metadata to supply compiler and linker flags. It does not install libraries. Project-specific headers and libraries remain optional dependencies; follow the project's setup instructions. See [Ubuntu's pkg-config manual](https://manpages.ubuntu.com/manpages/resolute/man1/pkg-config.1.html). The package list is [`build/apt-packages.txt`](../build/apt-packages.txt); the existing `APT_SNAPSHOT` pin in [`versions.env`](../versions.env) selects their versions.
 
@@ -120,7 +126,7 @@ psql --no-psqlrc --no-password --set ON_ERROR_STOP=1 --file ./migration.sql
 
 ## Kubernetes and Helm clients
 
-The image includes pinned `kubectl` and Helm release binaries for amd64 and arm64. Their versions and the projects' published SHA-256 checksums live in [`versions.env`](../versions.env). Each tool has its own build stage; the scheduled version updater resolves its stable release and both checksums. See [kubectl binary installation](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/) and [Helm binary installation](https://helm.sh/docs/intro/install/#from-the-binary-releases).
+The image includes `kubectl` and Helm release binaries, pinned in [`versions.env`](../versions.env) ([versions](versions.md)). See [kubectl binary installation](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/) and [Helm binary installation](https://helm.sh/docs/intro/install/#from-the-binary-releases).
 
 Inspect client versions without contacting a cluster:
 
@@ -142,4 +148,4 @@ Cluster credentials are not included. Supply a kubeconfig at runtime only when y
 
 ## Persistence
 
-`.venv` and `node_modules` live with the project under the workspace mount. `AGENTAINER_TOOLS=persist` controls supported user-wide tool installations separately. See [customization](customization.md#project-dependencies-and-installed-tools) for recreation and runtime-change guidance. A persistent home does not preserve dependencies installed only in a container's writable layer.
+`.venv` and `node_modules` live with the project under the workspace mount. User-wide tool installations are separate ([tools that agents install](configuration.md#tools-that-agents-install)). See [customization](customization.md#project-dependencies-and-installed-tools) for recreation and runtime-change guidance. A persistent home does not preserve dependencies installed only in a container's writable layer.
