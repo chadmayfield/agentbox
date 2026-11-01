@@ -1,0 +1,1 @@
+{"name": "fixture-market", "plugins": [{"name": "fixture-plugin", "source": {"source": "local", "path": "./plugins/fixture-plugin"}, "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}}]}

@@ -8,8 +8,8 @@ reference and is never replaced with the variable's value.
 How each agent is updated (checked against agent versions pinned in versions.env):
   claude    mcpServers in ~/.claude.json (or $CLAUDE_CONFIG_DIR/.claude.json)
   agy       mcpServers in ~/.gemini/config/mcp_config.json
-  codex     one marked block of [mcp_servers.<name>] tables at the end of
-            ~/.codex/config.toml; nothing outside the markers is touched
+  codex     its [mcp_servers.<name>] tables in ~/.codex/config.toml, rewritten as
+            one marked block at the end; every other line is kept
   opencode  agentainer-owned mcp.servers.<name> entries in ~/.config/opencode/opencode.json
             (OpenCode v2 has no "mcp remove" command)
 --if-changed skips a successful sync whose input has not changed. Both modes lock the
@@ -270,15 +270,157 @@ def codex_table(name, s, warn):
     return "\n".join(lines) + "\n"
 
 
-def codex_outside_block(text):
-    """The file without agentainer's marked block."""
-    b = text.find(MARK_BEGIN)
-    e = text.find(MARK_END, b + 1) if b >= 0 else -1
-    if b < 0 and e < 0 and MARK_END not in text:
-        return text
-    if text.count(MARK_BEGIN) != 1 or text.count(MARK_END) != 1 or e < b:
-        raise ValueError("invalid agentainer MCP markers; leave the file untouched")
-    return text[:b].rstrip("\n") + "\n" + text[e + len(MARK_END):].lstrip("\n")
+# Codex rewrites config.toml with its own TOML editor. "codex plugin add" puts its
+# tables between the marker comments and "codex mcp add" can drop the begin marker,
+# so the markers only label the block; ownership goes by server name.
+# A table header, from TOML's key grammar: bare or quoted parts joined by dots, with
+# spaces or tabs around the dots. Quoted parts may contain "]". Each character can
+# match only one way, so a line that is not a header fails in linear time.
+TOML_KEY = r"""(?:"(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_-]+)"""
+CODEX_HEADER = re.compile(r"^\[\[?[ \t]*(%s(?:[ \t]*\.[ \t]*%s)*)[ \t]*\]\]?[ \t]*(#.*)?$" % (TOML_KEY, TOML_KEY))
+CODEX_LAYOUT = ("codex: config.toml would lose settings agentainer does not manage, or uses a layout "
+                "agentainer cannot rewrite safely; nothing written")
+TOML_KEY_PART = re.compile(r"""\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*(?:\.|$)""")
+# The keys codex_table writes. Other keys on one of our servers (enabled,
+# enabled_tools, tools.<tool>.approval_mode and so on) belong to the user and are kept.
+CODEX_OWN_KEYS = {"command", "args", "env", "env_vars", "url", "bearer_token_env_var",
+                  "http_headers", "env_http_headers"}
+
+
+def toml_key_parts(key):
+    """The parts of a dotted TOML key with quotes removed, or None if KEY is not one."""
+    parts, pos = [], 0
+    while pos < len(key):
+        m = TOML_KEY_PART.match(key, pos)
+        if not m or m.end() == pos:
+            return None
+        parts.append(next(g for g in m.groups() if g is not None))
+        pos = m.end()
+    return parts or None
+
+
+def codex_header_parts(line):
+    """The key parts of a table header line, or None when LINE is not a header."""
+    header = CODEX_HEADER.match(line.strip())
+    return (toml_key_parts(header.group(1)) or []) if header else None
+
+
+def codex_owned_header(line, owned):
+    """True for [mcp_servers.<name>] or a sub-table of it, with <name> in OWNED;
+    False for any other table header; None when LINE is not a header."""
+    parts = codex_header_parts(line)
+    if parts is None:
+        return None
+    return len(parts) >= 2 and parts[0] == "mcp_servers" and parts[1] in owned
+
+
+def codex_marked_names(text):
+    """Server names inside one intact pair of markers, used when the manifest has no
+    Codex entry."""
+    lines = [line.strip() for line in text.splitlines()]
+    if lines.count(MARK_BEGIN) != 1 or lines.count(MARK_END) != 1:
+        return set()
+    names = set()
+    for line in lines[lines.index(MARK_BEGIN) + 1:lines.index(MARK_END)]:
+        parts = codex_header_parts(line) or []
+        if len(parts) == 2 and parts[0] == "mcp_servers":
+            names.add(parts[1])
+    return names
+
+
+def codex_drop_owned(text, owned):
+    """TEXT without the marker lines and without the headers, keys and blank lines of
+    the [mcp_servers.<name>] tables (and sub-tables) for names in OWNED. Comments and
+    every other line stay as they are."""
+    keep, dropping = [], False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped in (MARK_BEGIN, MARK_END):
+            continue
+        owned_header = codex_owned_header(line, owned)
+        if owned_header is not None:
+            dropping = owned_header
+        if not dropping or stripped.startswith("#"):
+            keep.append(line)
+    return "".join(keep)
+
+
+def toml_key(k):
+    return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else toml_str(k)
+
+
+def toml_any(v):
+    """V, a value of a type tomllib returns, written as a TOML value."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if v != v:
+            return "nan"
+        return {float("inf"): "inf", float("-inf"): "-inf"}.get(v, repr(v))
+    if isinstance(v, str):
+        return toml_str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_any(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{ " + ", ".join("%s = %s" % (toml_key(k), toml_any(x)) for k, x in v.items()) + " }"
+    if hasattr(v, "isoformat"):  # datetime, date and time
+        return v.isoformat()
+    raise TypeError("unsupported TOML value")
+
+
+def codex_servers(data):
+    servers = (data or {}).get("mcp_servers")
+    return servers if isinstance(servers, dict) else {}
+
+
+def codex_extras(data, names):
+    """The settings agentainer does not write on the servers NAMES in the parsed
+    config DATA, by name."""
+    servers = codex_servers(data)
+    return {name: {k: v for k, v in servers[name].items() if k not in CODEX_OWN_KEYS}
+            for name in names if isinstance(servers.get(name), dict)}
+
+
+def toml_same(a, b):
+    """Equality for parsed TOML that also compares types (false is not 0, 1 is not
+    1.0) and treats nan as equal to nan."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(toml_same(a[k], b[k]) for k in a)
+    if isinstance(a, list):
+        return len(a) == len(b) and all(toml_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, float) and a != a:
+        return b != b
+    return a == b
+
+
+def codex_check_kept(old, new, owned, written, warn):
+    """Raise unless NEW keeps every setting of OLD apart from the keys agentainer
+    writes on its own servers. A server removed from mcp.json loses all its keys."""
+    before = tomllib.loads(old)
+    try:
+        after = tomllib.loads(new)
+    except tomllib.TOMLDecodeError:
+        after = None
+    if after is not None:
+        for data, names, removed in ((before, owned, set(owned) - set(written)), (after, written, set())):
+            servers = data.get("mcp_servers")
+            if not isinstance(servers, dict):
+                continue
+            for name in names:
+                rest = {k: v for k, v in (servers.get(name) or {}).items() if k not in CODEX_OWN_KEYS}
+                if rest and name not in removed:
+                    servers[name] = rest
+                else:
+                    servers.pop(name, None)
+            if not servers:
+                del data["mcp_servers"]
+    if after is None or not toml_same(before, after):
+        warn(CODEX_LAYOUT)
+        raise ValueError("codex settings check failed")
 
 
 def codex_user_servers(text):
@@ -311,8 +453,23 @@ def sync_codex(home, desired, managed, warn):
             text = f.read()
     except FileNotFoundError:
         text = ""
-    outside = codex_outside_block(text)
-    taken = codex_user_servers(outside)
+    parsed = None
+    if tomllib is not None:
+        try:
+            parsed = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            warn("codex: config.toml is not valid TOML; nothing written")
+            raise
+    # Without a manifest entry, the servers inside intact markers that mcp.json still
+    # lists are ours; any other server there is left to the user.
+    owned = set(managed) or (codex_marked_names(text) & set(desired))
+    extras = codex_extras(parsed, owned)
+    outside = codex_drop_owned(text, owned)
+    try:
+        taken = codex_user_servers(outside)
+    except Exception:  # noqa: BLE001 - tomllib.TOMLDecodeError when tomllib exists
+        warn(CODEX_LAYOUT)
+        raise
     result, tables = [], []
     for name, s in desired.items():
         if name in taken:
@@ -321,6 +478,14 @@ def sync_codex(home, desired, managed, warn):
         table = codex_table(name, s, warn)
         if table is None:
             continue
+        table += "".join("%s = %s\n" % (toml_key(k), toml_any(v)) for k, v in extras.get(name, {}).items())
+        if parsed is not None and name in owned:
+            # Warn when removing an owned key that mcp.json does not set.
+            written = codex_servers(tomllib.loads(table)).get(name, {})
+            gone = sorted(k for k in codex_servers(parsed).get(name, {}) if k in CODEX_OWN_KEYS and k not in written)
+            if gone:
+                warn("codex: %s: removed %s, which mcp.json does not set; add it to mcp.json to keep it"
+                     % (name, ", ".join(gone)))
         tables.append(table)
         result.append(name)
     new = outside.rstrip("\n")
@@ -328,7 +493,8 @@ def sync_codex(home, desired, managed, warn):
         new += ("\n\n" if new else "") + MARK_BEGIN + "\n" + "\n".join(tables) + MARK_END
     new += "\n" if new else ""
     if tomllib is not None:
-        tomllib.loads(new)  # never write a file Codex cannot load
+        # Never write a file Codex cannot load, or one that lost a setting we do not own.
+        codex_check_kept(text, new, owned, result, warn)
     return path, new, result
 
 

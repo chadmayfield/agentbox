@@ -294,7 +294,10 @@ class SyncTests(SyncBase):
         self.assertEqual(self.json_servers("agy")["web"]["headers"], {"X-Static": "1"})
 
 class RobustnessTests(SyncBase):
-    def test_invalid_managed_markers_leave_user_bytes_untouched(self):
+    def test_stray_markers_are_replaced_and_user_settings_kept(self):
+        # Codex rewrites config.toml and can drop or move the marker comments
+        # ("codex mcp add" removes the begin marker). Damaged markers are replaced;
+        # user settings stay.
         self.write_mcp({"sample": {"command": "echo"}})
         for markers in (mcp.MARK_BEGIN, mcp.MARK_END,
                         mcp.MARK_END + "\n" + mcp.MARK_BEGIN,
@@ -303,9 +306,17 @@ class RobustnessTests(SyncBase):
                 original = 'model = "mine"\n' + markers + '\n[profiles.mine]\nmodel = "keep-me"\n'
                 with open(self.codex_path(), "w") as file:
                     file.write(original)
-                for _ in range(2):
-                    self.assertNotEqual(self.sync(), 0)
-                    self.assertEqual(self.read(".codex", "config.toml"), original)
+                self.assertEqual(self.sync(), 0)
+                toml = self.read(".codex", "config.toml")
+                self.assertTrue(toml.startswith('model = "mine"\n'), toml)
+                self.assertEqual(toml.count('[profiles.mine]\nmodel = "keep-me"\n'), 1)
+                self.assertEqual(toml.count(mcp.MARK_BEGIN), 1)
+                self.assertEqual(toml.count(mcp.MARK_END), 1)
+                self.assertLess(toml.index(mcp.MARK_BEGIN), toml.index(mcp.MARK_END))
+                self.assertEqual(toml.count("[mcp_servers.sample]"), 1)
+                self.assertIn("[mcp_servers.sample]", self.block(toml))
+                self.assertEqual(self.sync(), 0)
+                self.assertEqual(self.read(".codex", "config.toml"), toml)
 
     def codex_path(self):
         os.makedirs(os.path.join(self.home, ".codex"), exist_ok=True)
@@ -323,6 +334,309 @@ class RobustnessTests(SyncBase):
         self.assertIn("[[skills.config]]", toml)
         self.assertIn('command = "y"', toml)
         self.assertNotIn('command = "x"', toml)
+
+    # Tables "codex plugin marketplace add" and "codex plugin add" write. Codex 0.163.0
+    # puts them after our last table, before the end marker.
+    MARKETPLACE = '[marketplaces.fixture-market]\nsource_type = "local"\nsource = "/fx/fixture-market"\n'
+    PLUGIN = '[plugins."fixture-plugin@fixture-market"]\nenabled = true\n'
+    CODEX_TABLES = MARKETPLACE + "\n" + PLUGIN
+
+    def write_codex(self, text):
+        with open(self.codex_path(), "w") as f:
+            f.write(text)
+
+    def put_in_block(self, tables, before=None):
+        """Insert TABLES before the end marker, or before the line BEFORE when given."""
+        text = self.read(".codex", "config.toml")
+        self.assertEqual(text.count(mcp.MARK_END), 1)
+        anchor = mcp.MARK_END if before is None else before
+        self.assertEqual(text.count(anchor), 1)
+        self.write_codex(text.replace(anchor, tables + ("" if before is None else "\n") + anchor))
+
+    def block(self, text):
+        b = text.find(mcp.MARK_BEGIN)
+        return "" if b < 0 else text[b:text.find(mcp.MARK_END, b)]
+
+    def assert_codex_tables_kept(self, toml):
+        self.assertEqual(toml.count(self.MARKETPLACE), 1)
+        self.assertEqual(toml.count(self.PLUGIN), 1)
+        self.assertNotIn("[marketplaces.", self.block(toml))
+        self.assertNotIn("[plugins.", self.block(toml))
+        if mcp.tomllib is not None:
+            data = mcp.tomllib.loads(toml)
+            self.assertEqual(data["marketplaces"]["fixture-market"],
+                             {"source_type": "local", "source": "/fx/fixture-market"})
+            self.assertEqual(data["plugins"]["fixture-plugin@fixture-market"], {"enabled": True})
+
+    def test_codex_tables_inside_our_block_survive_a_resync(self):
+        user = 'model = "x"\n\n[profiles.mine]\nmodel = "keep"\n'
+        self.write_codex(user)
+        self.write_mcp({"e": {"url": "https://mcp.example.com/mcp"}})
+        self.assertEqual(self.sync(), 0)
+        self.put_in_block(self.CODEX_TABLES)
+        self.write_mcp({"e": {"url": "https://mcp.example.org/mcp"}})
+        self.assertEqual(self.sync(), 0)
+        toml = self.read(".codex", "config.toml")
+        self.assertTrue(toml.startswith(user), toml)
+        self.assert_codex_tables_kept(toml)
+        self.assertEqual(toml.count("[mcp_servers.e]"), 1)
+        self.assertIn('url = "https://mcp.example.org/mcp"', self.block(toml))
+        self.assertNotIn("example.com", toml)
+        # A later sync with the same input leaves the file as it is.
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(self.read(".codex", "config.toml"), toml)
+
+    def test_codex_tables_inside_our_block_survive_removing_mcp_json(self):
+        self.write_mcp({"e": {"url": "https://mcp.example.com/mcp"}})
+        self.assertEqual(self.sync(), 0)
+        self.put_in_block(self.CODEX_TABLES)
+        os.remove(os.path.join(self.home, ".agentainer", "mcp.json"))
+        self.assertEqual(self.sync(), 0)
+        toml = self.read(".codex", "config.toml")
+        self.assert_codex_tables_kept(toml)
+        self.assertNotIn(mcp.MARK_BEGIN, toml)
+        self.assertNotIn(mcp.MARK_END, toml)
+        self.assertNotIn("[mcp_servers.e]", toml)
+        # Adding mcp.json back puts one block after the kept tables.
+        self.write_mcp({"e": {"url": "https://mcp.example.org/mcp"}})
+        self.assertEqual(self.sync(), 0)
+        toml = self.read(".codex", "config.toml")
+        self.assert_codex_tables_kept(toml)
+        self.assertEqual(toml.count("[mcp_servers.e]"), 1)
+        self.assertLess(toml.index(self.PLUGIN), toml.index(mcp.MARK_BEGIN))
+
+    def test_codex_tables_anywhere_in_our_block_survive(self):
+        for name, before in (("at the start", "[mcp_servers.e]"), ("between ours", "[mcp_servers.f]")):
+            with self.subTest(name):
+                self.write_codex("")
+                self.write_mcp({"e": {"command": "a"}, "f": {"command": "b"}})
+                self.assertEqual(self.sync(), 0)
+                self.put_in_block(self.CODEX_TABLES + '\n[[skills.config]]\nname = "s"\n', before=before)
+                self.write_mcp({"e": {"command": "c"}, "f": {"command": "d"}})
+                self.assertEqual(self.sync(), 0)
+                toml = self.read(".codex", "config.toml")
+                self.assert_codex_tables_kept(toml)
+                self.assertEqual(toml.count('[[skills.config]]\nname = "s"\n'), 1)
+                self.assertNotIn("[[skills.", self.block(toml))
+                for server, command in (("e", "c"), ("f", "d")):
+                    self.assertEqual(toml.count("[mcp_servers.%s]" % server), 1)
+                    self.assertIn('[mcp_servers.%s]\ncommand = "%s"' % (server, command), self.block(toml))
+
+    def test_codex_mcp_add_inside_our_block_keeps_the_user_server(self):
+        # Exact result of "codex mcp add mine -- echo hi" on a synced config, checked
+        # with Codex 0.163.0: the begin marker is gone and the user's server sits
+        # between our table and the end marker.
+        self.write_codex('model = "m"\n')
+        self.write_mcp({"e": {"url": "https://mcp.example.com/mcp"}})
+        self.assertEqual(self.sync(), 0)
+        self.write_codex('model = "m"\n\n[mcp_servers.e]\nurl = "https://mcp.example.com/mcp"\n\n'
+                         '[mcp_servers.mine]\ncommand = "echo"\nargs = ["hi"]\n' + mcp.MARK_END + "\n")
+        self.write_mcp({"e": {"url": "https://mcp.example.org/mcp"}})
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        toml = self.read(".codex", "config.toml")
+        self.assertTrue(toml.startswith('model = "m"\n'), toml)
+        self.assertEqual(toml.count('[mcp_servers.mine]\ncommand = "echo"\nargs = ["hi"]\n'), 1)
+        self.assertNotIn("[mcp_servers.mine]", self.block(toml))
+        self.assertEqual(toml.count("[mcp_servers.e]"), 1)
+        self.assertIn('url = "https://mcp.example.org/mcp"', self.block(toml))
+        self.assertEqual((toml.count(mcp.MARK_BEGIN), toml.count(mcp.MARK_END)), (1, 1))
+        manifest = json.loads(self.read(".agentainer", "mcp-managed.json"))
+        self.assertEqual(manifest["codex"], ["e"])
+
+    def test_codex_block_from_before_the_manifest_is_still_ours(self):
+        # A config written by an older sync, with no manifest entry for it.
+        self.write_codex('model = "m"\n\n' + mcp.MARK_BEGIN + '\n[mcp_servers.e]\nurl = "https://mcp.example.com/mcp"\n'
+                         + mcp.MARK_END + "\n")
+        self.write_mcp({"e": {"url": "https://mcp.example.org/mcp"}})
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("did not add", err)
+        toml = self.read(".codex", "config.toml")
+        self.assertEqual(toml.count("[mcp_servers.e]"), 1)
+        self.assertIn('url = "https://mcp.example.org/mcp"', self.block(toml))
+
+    def test_comments_near_our_tables_are_kept(self):
+        self.write_mcp({"e": {"command": "a"}})
+        self.assertEqual(self.sync(), 0)
+        self.put_in_block("# about the plugin\n" + self.PLUGIN)
+        with open(self.codex_path(), "a") as f:
+            f.write("# my closing note\n")
+        self.write_mcp({"e": {"command": "b"}})
+        self.assertEqual(self.sync(), 0)
+        toml = self.read(".codex", "config.toml")
+        self.assertEqual(toml.count("# about the plugin\n" + self.PLUGIN), 1)
+        self.assertEqual(toml.count("# my closing note\n"), 1)
+        self.assertIn('[mcp_servers.e]\ncommand = "b"', self.block(toml))
+        # A comment after our last table, with nothing after it, is kept too.
+        self.put_in_block("# note under our table\n")
+        self.write_mcp({"e": {"command": "c"}})
+        self.assertEqual(self.sync(), 0)
+        toml = self.read(".codex", "config.toml")
+        self.assertEqual(toml.count("# note under our table\n"), 1)
+        self.assertIn('[mcp_servers.e]\ncommand = "c"', self.block(toml))
+
+    def test_codex_env_sub_table_of_our_server_is_replaced(self):
+        # "codex mcp add" rewrites an inline env = { ... } as an [mcp_servers.<name>.env]
+        # table (seen with Codex 0.163.0); it is still our server's env.
+        self.write_mcp({"a": {"command": "srv", "env": {"MODE": "ro"}}})
+        self.assertEqual(self.sync(), 0)
+        text = self.read(".codex", "config.toml").replace('env = { "MODE" = "ro" }\n', "")
+        self.write_codex(text.replace(mcp.MARK_END, '\n[mcp_servers.a.env]\nMODE = "ro"\n' + mcp.MARK_END))
+        self.write_mcp({"a": {"command": "srv", "env": {"MODE": "rw"}}})
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        toml = self.read(".codex", "config.toml")
+        self.assertNotIn("[mcp_servers.a.env]", toml)
+        self.assertEqual(toml.count('env = { "MODE" = "rw" }'), 1)
+        self.assertNotIn('"ro"', toml)
+
+    def test_marker_fallback_is_off_when_the_manifest_lists_codex_servers(self):
+        self.write_mcp({"e": {"command": "a"}})
+        self.assertEqual(self.sync(), 0)
+        # The user puts their own server inside our markers.
+        self.put_in_block('[mcp_servers.mine]\ncommand = "theirs"\n')
+        self.write_mcp({"e": {"command": "b"}, "mine": {"command": "ours"}})
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        toml = self.read(".codex", "config.toml")
+        self.assertIn("codex already has a server named mine", err)
+        self.assertEqual(toml.count('[mcp_servers.mine]\ncommand = "theirs"\n'), 1)
+        self.assertNotIn('command = "ours"', toml)
+
+    def test_marker_fallback_claims_only_servers_in_mcp_json(self):
+        # No manifest: an older config whose markers also hold a user server.
+        self.write_codex(mcp.MARK_BEGIN + '\n[mcp_servers.e]\ncommand = "a"\n\n[mcp_servers.mine]\ncommand = "theirs"\n'
+                         + mcp.MARK_END + "\n")
+        self.write_mcp({"e": {"command": "b"}})
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        toml = self.read(".codex", "config.toml")
+        self.assertEqual(toml.count('[mcp_servers.mine]\ncommand = "theirs"\n'), 1)
+        self.assertEqual(toml.count("[mcp_servers.e]"), 1)
+        self.assertIn('command = "b"', self.block(toml))
+
+    def test_quoted_and_indented_spellings_of_our_table_are_rewritten(self):
+        for header in ("[mcp_servers.'e']", '[mcp_servers."e"]', "[ mcp_servers . e ]"):
+            with self.subTest(header):
+                self.write_codex('model = "m"\n\n  ' + mcp.MARK_BEGIN + "\n" + header + '\ncommand = "a"\n'
+                                 + mcp.MARK_END + "\n")
+                self.write_mcp({"e": {"command": "b"}})
+                rc, err = self.sync_err()
+                self.assertEqual(rc, 0, err)
+                toml = self.read(".codex", "config.toml")
+                self.assertNotIn(header, toml)
+                self.assertNotIn('command = "a"', toml)
+                self.assertEqual(toml.count(mcp.MARK_BEGIN), 1)
+                self.assertIn('[mcp_servers.e]\ncommand = "b"', self.block(toml))
+
+    @unittest.skipIf(mcp.tomllib is None, "needs tomllib (Python 3.11+); tests/80-mcp.sh runs it in the image")
+    def test_codex_settings_on_our_server_are_kept(self):
+        # Keys from the Codex config reference that agentainer does not write.
+        self.write_mcp({"e": {"url": "https://mcp.example.com/mcp"}})
+        self.assertEqual(self.sync(), 0)
+        self.put_in_block('enabled = false\nenabled_tools = ["search", "fetch"]\n\n'
+                          '[mcp_servers.e.tools.search]\napproval_mode = "approve"\noutput_token_limit = 4000\n')
+        self.write_mcp({"e": {"url": "https://mcp.example.org/mcp"}})
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        toml = self.read(".codex", "config.toml")
+        server = mcp.tomllib.loads(toml)["mcp_servers"]["e"]
+        self.assertEqual(server, {"url": "https://mcp.example.org/mcp", "enabled": False,
+                                  "enabled_tools": ["search", "fetch"],
+                                  "tools": {"search": {"approval_mode": "approve", "output_token_limit": 4000}}})
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(self.read(".codex", "config.toml"), toml)
+        # Removing the server from mcp.json removes its settings too.
+        self.write_mcp({})
+        self.assertEqual(self.sync(), 0)
+        self.assertNotIn("mcp_servers", mcp.tomllib.loads(self.read(".codex", "config.toml")))
+
+    @unittest.skipIf(mcp.tomllib is None, "needs tomllib (Python 3.11+); tests/80-mcp.sh runs it in the image")
+    def test_codex_settings_keep_their_types_and_quoted_keys(self):
+        self.write_mcp({"e": {"command": "a"}})
+        self.assertEqual(self.sync(), 0)
+        self.put_in_block('enabled = false\nstartup_timeout_sec = 12.5\nsince = 2026-01-02T03:04:05Z\n\n'
+                          '[mcp_servers.e.tools."a.b"]\napproval_mode = "approve"\nlimit = 4000\n')
+        self.write_mcp({"e": {"command": "b"}})
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        server = mcp.tomllib.loads(self.read(".codex", "config.toml"))["mcp_servers"]["e"]
+        self.assertIs(server["enabled"], False)
+        self.assertIs(type(server["startup_timeout_sec"]), float)
+        self.assertEqual(server["startup_timeout_sec"], 12.5)
+        self.assertEqual(server["since"].isoformat(), "2026-01-02T03:04:05+00:00")
+        self.assertEqual(server["tools"], {"a.b": {"approval_mode": "approve", "limit": 4000}})
+        self.assertIs(type(server["tools"]["a.b"]["limit"]), int)
+
+    @unittest.skipIf(mcp.tomllib is None, "needs tomllib (Python 3.11+); tests/80-mcp.sh runs it in the image")
+    def test_codex_nan_elsewhere_does_not_block_the_sync(self):
+        self.write_codex("ratio = nan\n")
+        self.write_mcp({"e": {"command": "a"}})
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("ratio = nan", self.read(".codex", "config.toml"))
+
+    @unittest.skipIf(mcp.tomllib is None, "needs tomllib (Python 3.11+); tests/80-mcp.sh runs it in the image")
+    def test_codex_invalid_toml_is_reported_and_left_alone(self):
+        self.write_codex("model = \n")
+        self.write_mcp({"e": {"command": "a"}})
+        rc, err = self.sync_err()
+        self.assertNotEqual(rc, 0)
+        self.assertIn("codex: config.toml is not valid TOML; nothing written", err)
+        self.assertEqual(self.read(".codex", "config.toml"), "model = \n")
+
+    @unittest.skipIf(mcp.tomllib is None, "needs tomllib (Python 3.11+); tests/80-mcp.sh runs it in the image")
+    def test_codex_removing_an_own_key_mcp_json_does_not_set_warns(self):
+        self.write_mcp({"a": {"command": "x"}})
+        self.assertEqual(self.sync(), 0)
+        self.put_in_block('\n[mcp_servers.a.env]\nUSERVAR = "keep"\n')
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("codex: a: removed env, which mcp.json does not set; add it to mcp.json to keep it", err)
+        self.assertNotIn("USERVAR", self.read(".codex", "config.toml"))
+
+    def test_codex_header_check_is_fast_on_long_lines(self):
+        # The header pattern runs on every line, including multi-line string content.
+        import time
+        start = time.monotonic()
+        spaces = " " * 100000
+        for line in ("[a" + spaces + "x", "[a" + spaces + "]x", "[" + "a." * 100000, '["' + "x" * 200000):
+            self.assertIsNone(mcp.codex_header_parts(line))
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertEqual(mcp.codex_header_parts('[ mcp_servers . "a]b" ] # [c]'), ["mcp_servers", "a]b"])
+        self.assertEqual(mcp.codex_header_parts("[[mcp_servers.'x'.y]]"), ["mcp_servers", "x", "y"])
+
+    def test_codex_user_table_with_a_bracket_in_a_quoted_key_is_kept(self):
+        self.write_mcp({"e": {"command": "a"}})
+        self.assertEqual(self.sync(), 0)
+        with open(self.codex_path(), "a") as f:
+            f.write('\n[profiles."x]y"]\nk = 1\n')
+        self.write_mcp({"e": {"command": "b"}})
+        rc, err = self.sync_err()
+        self.assertEqual(rc, 0, err)
+        toml = self.read(".codex", "config.toml")
+        self.assertEqual(toml.count('[profiles."x]y"]\nk = 1\n'), 1)
+        self.assertIn('[mcp_servers.e]\ncommand = "b"', self.block(toml))
+
+    @unittest.skipIf(mcp.tomllib is None, "needs tomllib (Python 3.11+); tests/80-mcp.sh runs it in the image")
+    def test_codex_sync_refuses_a_write_that_would_drop_settings(self):
+        self.write_mcp({"e": {"url": "https://mcp.example.com/mcp"}})
+        self.assertEqual(self.sync(), 0)
+        self.put_in_block(self.CODEX_TABLES)
+        original = self.read(".codex", "config.toml")
+        self.write_mcp({"e": {"url": "https://mcp.example.org/mcp"}})
+        # A table removal that also drops a table it does not own must stop the write.
+        real = mcp.codex_drop_owned
+        with mock.patch.object(mcp, "codex_drop_owned",
+                               lambda text, owned: real(text, owned).replace(self.PLUGIN, "")):
+            rc, err = self.sync_err()
+        self.assertNotEqual(rc, 0)
+        self.assertIn("codex: config.toml would lose settings agentainer does not manage", err)
+        self.assertEqual(self.read(".codex", "config.toml"), original)
+        # Positive control: the same sync without the fault writes and keeps the tables.
+        self.assertEqual(self.sync(), 0)
+        self.assert_codex_tables_kept(self.read(".codex", "config.toml"))
 
     def test_user_server_in_other_toml_spellings_is_left_alone(self):
         for text in ('mcp_servers.foo.command = "theirs"\n',
