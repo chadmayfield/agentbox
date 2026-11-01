@@ -572,6 +572,54 @@ def r_node():
     return parse_node_shasums(shasums.decode(), ver)
 
 
+# AWS CLI v2 installer zips, one per version and architecture, each with a detached PGP
+# signature at <zip>.sig. AWS links the v2 changelog as the list of versions
+# (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-version.html).
+# AWS publishes its signing key only as text in the install guide
+# (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), so
+# AWSCLI_KEY is a copy of that block and AWSCLI_KEY_FINGERPRINT is the fingerprint the guide
+# lists for it. AWS publishes no checksums; the pins are SHA-256 values of the verified zips.
+AWSCLI_CHANGELOG = "https://raw.githubusercontent.com/aws/aws-cli/v2/CHANGELOG.rst"
+AWSCLI_DOWNLOADS = "https://awscli.amazonaws.com"
+AWSCLI_KEY_FINGERPRINT = "FB5DB77FD5C118B80511ADA8A6310ACC4672475C"
+AWSCLI_KEY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys", "aws-cli-public-key.asc")
+AWSCLI_TRIPLES = (("AMD64", "x86_64"), ("ARM64", "aarch64"))
+
+
+def parse_awscli_changelog(text):
+    """The newest version in the AWS CLI v2 CHANGELOG.rst, whose first heading is the newest release."""
+    found = re.findall(r"^([0-9]+\.[0-9]+\.[0-9]+)\n=+$", text, re.M)
+    if not found:
+        raise LookupFailed("awscli: no version heading in CHANGELOG.rst")
+    if not found[0].startswith("2."):
+        raise LookupFailed("awscli: newest changelog version %s is not v2" % found[0])
+    if found[0] != max(found, key=version_key):
+        raise LookupFailed("awscli: first changelog heading %s is not the newest version" % found[0])
+    return found[0]
+
+
+def awscli_zip_url(triple, ver):
+    return "%s/awscli-exe-linux-%s-%s.zip" % (AWSCLI_DOWNLOADS, triple, ver)
+
+
+def r_awscli():
+    ver = parse_awscli_changelog(fetch(AWSCLI_CHANGELOG))
+    # The zips are about 75 MB each. When the version is already pinned, its checksums are
+    # already pinned too, so nothing is downloaded and the pins stay as they are. main
+    # snapshots the pins from --file into EXTRA_FILES.pins before the resolvers run.
+    if EXTRA_FILES.pins.get("AWSCLI_VERSION") == ver:
+        return {}
+    with open(AWSCLI_KEY, "rb") as f:
+        key = f.read()
+    out = {"AWSCLI_VERSION": ver}
+    for up, triple in AWSCLI_TRIPLES:
+        url = awscli_zip_url(triple, ver)
+        data = fetch_bytes(url)
+        verify_signature(data, fetch_bytes(url + ".sig"), key, AWSCLI_KEY_FINGERPRINT)
+        out["AWSCLI_SHA256_" + up] = hashlib.sha256(data).hexdigest()
+    return out
+
+
 def r_agy():
     out = {}
     versions = set()
@@ -984,7 +1032,7 @@ def r_buildkit():
 
 
 RESOLVERS = [r_base, r_go, r_rust, r_yq, r_gh, r_uv, r_ruff, r_trivy, r_abtop, r_unslop, r_golangci,
-             r_kubectl, r_helm, r_tea, r_claude, r_node, r_codex, r_agy, r_opencode, r_k8s_images, r_buildkit,
+             r_kubectl, r_helm, r_awscli, r_tea, r_claude, r_node, r_codex, r_agy, r_opencode, r_k8s_images, r_buildkit,
              r_extras]
 
 
