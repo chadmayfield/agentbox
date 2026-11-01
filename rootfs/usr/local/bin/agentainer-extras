@@ -265,6 +265,23 @@ install_one() {
 	rm -rf "$logs"
 	logs=''
 
+	# Remove links into this extra for commands the linked version no longer lists in bins.
+	keep=' '
+	set -f
+	for b in $bins; do keep="$keep$b "; done
+	set +f
+	for link in "$active/npm/bin"/*; do
+		[ -L "$link" ] || continue
+		case $(readlink "$link") in
+		"../extras/$name/"*) ;;
+		*) continue ;;
+		esac
+		case $keep in
+		*" ${link##*/} "*) continue ;;
+		esac
+		rm -f "$link" || err "$name: cannot remove $link, a command the installed version does not have"
+	done
+
 	# Keep the version just replaced, which another container may still run, and remove older ones.
 	for d in "$ext/$name@"*; do
 		[ -d "$d" ] || continue

@@ -59,7 +59,7 @@ Any failure before the `npm/extras/<name>` link switches removes the new directo
 
 ## Upgrades and removal
 
-An upgrade keeps the directory it replaced, because another container on the same home may still run it, and deletes it at the next install of that extra. Older directories are deleted at that point too.
+An upgrade keeps the directory it replaced, because another container on the same home may still run it, and deletes it at the next install of that extra. Older directories are deleted at that point too. An upgrade also removes the bin links of commands the new version does not list.
 
 `remove` deletes the `npm/extras/<name>` link, every `npm/extras/<name>@*` directory and the bin links into them. Files the tool created outside `npm/extras`, such as its data directory or settings in your home, stay. The command says so when it finishes.
 
