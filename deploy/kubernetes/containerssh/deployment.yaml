@@ -17,7 +17,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: containerssh
-          image: docker.io/containerssh/containerssh:v0.6@sha256:7adf5995d6d43ecc95fe8225ee87e14d0f1996a03a890b3824d07f5c6a572d07
+          image: docker.io/containerssh/containerssh:v0.6@sha256:f6b195c221739b0f1a43c567bc9df0a0f3b3bd92ccc25ef451e6d4122820c13b
           ports: [{containerPort: 2222, name: ssh}]
           securityContext:
             allowPrivilegeEscalation: false
