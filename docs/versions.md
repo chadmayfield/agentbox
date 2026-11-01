@@ -11,6 +11,8 @@
 
 [`versions.env`](../versions.env) pins every input of the image: the base image digest, the apt snapshot date, each agent and tool version, and the checksum of every download. The build checks each download against it. The one exception is the Rust toolchain: `rustup-init` downloads the components and checks each against the hashes in Rust's own channel manifest.
 
+Node.js is the official Linux tarball from nodejs.org, installed in `/opt/node` with `node`, `npm` and `npx` linked into `/usr/local/bin`. `versions.env` pins `NODE_VERSION` and the two Linux checksums (`NODE_SHA256_AMD64`, `NODE_SHA256_ARM64`), and the scheduled update follows the 26.x line. The image removes the `include` and `share` directories from the install.
+
 Claude Code is the native binary from Anthropic's release host, the file Anthropic's native installer downloads. The scheduled update checks the release's `manifest.json` against Anthropic's GPG signature before it pins the binary's SHA-256 ([binary integrity](https://code.claude.com/docs/en/setup#binary-integrity-and-code-signing)).
 
 Each tool is built in its own stage. In the layers the release build creates, any file time later than `SOURCE_DATE_EPOCH` from `versions.env` is set to it (BuildKit's `rewrite-timestamp` option). A layer whose tool did not change is then byte-identical to the previous release's, as long as the same BuildKit version (`BUILDKIT_IMAGE`) compressed it, so updating the image downloads only the layers that changed. A release that updates BuildKit can change every layer's digest. `scripts/build.sh` does the same with Podman 5.6 or later. An older Podman server ignores the options, so the script leaves them out and prints a warning; the image works the same, but every layer gets a new digest.
@@ -119,7 +121,39 @@ The updater requires `gh`, `cosign` and GnuPG in addition to Python. The schedul
 | Trivy binary | Signed checksum list from `aquasecurity/trivy`, workflow `reusable-release.yaml` at the selected release tag. |
 | Codex package | Sigstore bundle for the whole package from `openai/codex`, workflow `rust-release.yml` at the selected release tag. |
 | Claude Code | GPG-signed release manifest with the pinned Anthropic key fingerprint. |
+| Node.js | GPG-signed `SHASUMS256.txt` by one of the release keys in `scripts/keys/nodejs-release-keys.asc`. |
 
 GitHub provenance checks require the exact workflow certificate identity, repository, source ref and GitHub OIDC issuer ([GitHub CLI verification](https://cli.github.com/manual/gh_attestation_verify), [CLI release workflow](https://github.com/cli/cli/blob/trunk/.github/workflows/deployment.yml), [uv release workflow](https://github.com/astral-sh/uv/blob/main/.github/workflows/release.yml), [Ruff release workflow](https://github.com/astral-sh/ruff/blob/main/.github/workflows/release.yml), [golangci-lint release workflow](https://github.com/golangci/golangci-lint/blob/main/.github/workflows/release.yml)). Sigstore bundle checks require the exact workflow certificate identity and GitHub OIDC issuer ([cosign blob verification](https://docs.sigstore.dev/cosign/verifying/verify_blob/), [yq signing workflow](https://github.com/mikefarah/yq/blob/master/.github/workflows/release.yml), [Trivy signing workflow](https://github.com/aquasecurity/trivy/blob/main/.github/workflows/reusable-release.yaml), [Codex signing action](https://github.com/openai/codex/blob/main/.github/actions/linux-code-sign/action.yml)).
 
 Publisher signature verification for Go, Rust, abtop, tea, kubectl, Helm, Antigravity, OpenCode and the pinned container images is not verified by this implementation. Existing checksum, package-manager and digest checks remain. Some upstream projects publish signing material; this list does not claim they lack it. Their trust policies and verification paths need separate verification before enforcement. No unsigned-update fallback exists for the publishers in the table.
+
+### Node.js release keyring
+
+The updater takes the newest stable `v26.x.y` from `https://nodejs.org/dist/index.json`. It checks that version's `SHASUMS256.txt.sig` with `gpg` against the keyring in [`scripts/keys/nodejs-release-keys.asc`](../scripts/keys/nodejs-release-keys.asc). A signature from any one of the eight active releasers' keys passes. The updater then reads the two Linux checksums from the verified file.
+
+A failed Node.js check stops the whole scheduled update. `main()` in [`scripts/bump_versions.py`](../scripts/bump_versions.py) returns 1 on any `LookupFailed` and writes no pins, for every tool. This happens when the key that signed the release has expired or been revoked (`EXPKEYSIG` or `REVKEYSIG` in GnuPG's status output, with the message "the pinned signing key needs a hand update") and when a release is signed by a key that is not in the keyring. Updates for all tools resume only after a maintainer refreshes the keyring by hand.
+
+The keyring comes from [`nodejs/release-keys`](https://github.com/nodejs/release-keys/tree/481637f813e912c4aa3622d7964ab426c97b8e8d), at commit `481637f813e912c4aa3622d7964ab426c97b8e8d`. Node.js lists the active releasers in its [release keys section](https://github.com/nodejs/node#release-keys). The scheduled update never changes these files. Refresh the keyring in its own pull request:
+
+1. At the new `nodejs/release-keys` commit, take the fingerprints listed between the `<!-- Active releasers keys -->` markers in its README.
+2. Download each `keys/<FINGERPRINT>.asc` at that commit.
+3. Import the files into a temporary `GNUPGHOME`.
+4. Write `scripts/keys/nodejs-release-keys.asc` with `gpg --armor --export <the fingerprints>`. Do not concatenate the downloaded files. At least one of them has no trailing newline, and plain concatenation silently drops a key.
+5. Set `NODE_KEY_FINGERPRINTS` and the commit in its comment in `scripts/bump_versions.py`.
+6. Update the commit and the expiry dates in this section.
+7. Run the unit tests. `test_node_keyring_holds_exactly_the_pinned_fingerprints` checks the keyring file against the constant.
+
+Expiry dates of the eight keys in the current keyring, read with `gpg --list-keys` from a temporary `GNUPGHOME`:
+
+| Releaser | Expires |
+|---|---|
+| Rafael Gonzaga | 2027-06-04 (primary key) |
+| Ulises Gascón | 2027-07-18 (signing subkey); 2028-06-01 (primary key) |
+| Stewart X Addison | 2028-06-28 |
+| Marco Ippolito | 2034-03-26 |
+| Ruy Adorno | none |
+| Antoine du Hamel | none |
+| Richard Lau | none |
+| Juan José Arboleda | none |
+
+Refresh the keyring before the earliest date.

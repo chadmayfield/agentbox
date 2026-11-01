@@ -68,7 +68,7 @@ npm exec -- tsc --version
 npm test
 ```
 
-Keep `package.json`, `package-lock.json` and the tests in version control; leave `node_modules` out. `--save-exact` records the selected dependency version without a range. `npm exec` runs the local TypeScript compiler in this example. See [npm install](https://docs.npmjs.com/cli/v9/commands/npm-install/), [npm pkg](https://docs.npmjs.com/cli/v9/commands/npm-pkg/) and [Node's test runner](https://github.com/nodejs/node/blob/v22.x/doc/api/test.md).
+Keep `package.json`, `package-lock.json` and the tests in version control; leave `node_modules` out. `--save-exact` records the selected dependency version without a range. `npm exec` runs the local TypeScript compiler in this example. See [npm install](https://docs.npmjs.com/cli/v9/commands/npm-install/), [npm pkg](https://docs.npmjs.com/cli/v9/commands/npm-pkg/) and [Node's test runner](https://github.com/nodejs/node/blob/v26.x/doc/api/test.md).
 
 For an existing npm project with a committed lockfile and a test script:
 
@@ -79,7 +79,7 @@ npm test
 
 `npm ci` requires the lockfile to agree with `package.json`, replaces `node_modules` and leaves the dependency declarations and lockfile unchanged. Use `npm install` for deliberate dependency changes. Keep any project-specific install flags in the project's configuration so local and CI installs agree ([npm ci](https://docs.npmjs.com/cli/v9/commands/npm-ci/)).
 
-The `packageManager` field records the project's expected package-manager version. Running plain `npm` uses the executable on `PATH`; the field alone does not switch it. Check `npm --version` against the project's requirement. Corepack documents version selection for npm, pnpm and Yarn in its [project configuration](https://github.com/nodejs/corepack#when-authoring-packages). Follow an existing pnpm or Yarn project's setup rather than creating an npm lockfile beside its own lockfile.
+The `packageManager` field records the project's expected package-manager version. Running plain `npm` uses the executable on `PATH`; the field alone does not switch it. Check `npm --version` against the project's requirement. The Corepack README says Node.js distributed Corepack "up to (but not including) 25.0.0" ([Corepack README](https://github.com/nodejs/corepack#readme)). The image's Node.js 26 does not include it. `tar -tf node-v26.13.0-linux-x64.tar.xz` lists no corepack entry. To use pnpm or Yarn, install it the way the project documents. Alternatively, run `npm install -g corepack` and then `corepack enable` (same README). Follow an existing pnpm or Yarn project's setup rather than creating an npm lockfile beside its own lockfile.
 
 ## Language servers
 
@@ -99,6 +99,8 @@ cmake --build build
 ```
 
 `-S` selects the source directory and `-B` keeps generated files in a separate build directory. `-G Ninja` selects the Ninja generator. See the [CMake command reference](https://cmake.org/cmake/help/latest/manual/cmake.1.html) and [Ninja manual](https://ninja-build.org/manual.html).
+
+Native addons build through `node-gyp`, which downloads the development files (headers) for the target Node.js version. `--devdir` sets the download directory, and the default is the OS cache directory. `--tarball` takes the headers from a local tarball ([node-gyp README](https://github.com/nodejs/node-gyp#readme)). That README does not say when the download happens or how to build offline with the image's Node.js; not verified.
 
 pkg-config reads installed `.pc` metadata to supply compiler and linker flags. It does not install libraries. Project-specific headers and libraries remain optional dependencies; follow the project's setup instructions. See [Ubuntu's pkg-config manual](https://manpages.ubuntu.com/manpages/resolute/man1/pkg-config.1.html). The package list is [`build/apt-packages.txt`](../build/apt-packages.txt); the existing `APT_SNAPSHOT` pin in [`versions.env`](../versions.env) selects their versions.
 
