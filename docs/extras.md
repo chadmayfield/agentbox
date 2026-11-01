@@ -116,7 +116,7 @@ The REA Frida tools do not work in this install. The optional `frida` package in
 
 ## Known findings
 
-A Trivy scan of the extras lockfiles at the pins in `versions.env`, run with the same command as CI's `lint-unit` job, lists these findings. Kandev has none.
+A Trivy scan of the extras lockfiles at the pins in `versions.env`, run with the same command as CI's `lint-unit` job, and the repository's Dependabot alerts list these findings. Kandev has none.
 
 | Extra | Severity | ID | Package and installed version | Fixed in |
 |---|---|---|---|---|
@@ -124,11 +124,11 @@ A Trivy scan of the extras lockfiles at the pins in `versions.env`, run with the
 | OpenChamber (`@openchamber/web` 2.5.1) | Critical | CVE-2026-102829 ([GHSA-v5rq-49vh-5v5c](https://github.com/advisories/GHSA-v5rq-49vh-5v5c)) | `@simple-git/argv-parser` 1.1.1 | 2.0.1 |
 | OpenChamber (`@openchamber/web` 2.5.1) | High | CVE-2026-102826 ([GHSA-g4wm-2vf7-vfgr](https://github.com/advisories/GHSA-g4wm-2vf7-vfgr)) | `simple-git` 3.36.0 | 4.0.0 |
 | OpenChamber (`@openchamber/web` 2.5.1) | High | CVE-2026-102827 ([GHSA-858h-whjf-mvg5](https://github.com/advisories/GHSA-858h-whjf-mvg5)) | `simple-git` 3.36.0 | 4.0.0 |
-| OpenChamber (`@openchamber/web` 2.5.1) | High | CVE-2026-116689 ([GHSA-mrwp-f3q8-3g9p](https://github.com/advisories/GHSA-mrwp-f3q8-3g9p)) | `follow-redirects` 1.16.1 | 1.16.2 |
+| REA (`rea-agents` 6.8.0) | High | CVE-2023-54404 ([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5)) | `zod` 4.4.3 | 4.6.6 |
 | REA (`rea-agents` 6.8.0) | Medium | CVE-2026-118773 ([GHSA-3g3m-2fjr-6pw4](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4)) | `glob` 13.0.6 | 14.0.2 |
 | REA (`rea-agents` 6.8.0) | Medium | CVE-2026-118764 ([GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249)) | `minimatch` 10.2.6 | 11.0.1 |
 
-OpenChamber 2.5.1 declares `simple-git` `^3.36.0`, which excludes 4.x, so the `simple-git` fixes need a newer OpenChamber release. The lockfile changes only when the pin changes, so the `follow-redirects` fix also arrives with a new pin. The scheduled update picks up newer releases once they pass the 7-day rule ([How the pins update](#how-the-pins-update)).
+OpenChamber 2.5.1 declares `simple-git` `^3.36.0`, which excludes 4.x, so the `simple-git` fixes need a newer OpenChamber release. REA 6.8.0 pins `zod` at exactly 4.4.3, so the `zod` fix needs a newer REA release. The scheduled update picks up newer releases once they pass the 7-day rule ([How the pins update](#how-the-pins-update)).
 
 The list changes with each pin update. The step summary of the `lint-unit` job in CI ([`build.yml`](../.github/workflows/build.yml)) has the current list.
 
