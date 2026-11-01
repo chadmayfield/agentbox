@@ -5,12 +5,14 @@
 . "$(dirname "$0")/../lib.sh"
 cd "$(dirname "$0")/../.." || exit 2
 tag=localhost/cx-agentainer:test-uid-$$
-trap '"$RUNTIME" rmi -f "$tag" >/dev/null 2>&1' EXIT
+log=$(mktemp) || exit 2
+trap '"$RUNTIME" rmi -f "$tag" >/dev/null 2>&1; rm -f "$log"' EXIT
 trap 'exit 130' INT TERM
-if RUNTIME="$RUNTIME" sh scripts/build.sh --uid 1001 --gid 20 --tag "$tag" >/dev/null 2>&1; then
+if RUNTIME="$RUNTIME" sh scripts/build.sh --uid 1001 --gid 20 --tag "$tag" >"$log" 2>&1; then
 	pass "builds with --uid 1001 --gid 20"
 else
-	fail "builds with --uid 1001 --gid 20"
+	fail "builds with --uid 1001 --gid 20" "last 80 lines of the build:"
+	tail -n 80 "$log" | awk '{ print "  # " $0 }'
 	finish
 	exit 1
 fi
