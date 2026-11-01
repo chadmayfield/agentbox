@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Markdown sections for the CI job summary.
 
-  build_report.py versions VERSIONS.json     pinned versions and key apt packages
+  build_report.py versions VERSIONS.json     pinned versions, key apt packages and extras pins
   build_report.py pins OLD.env NEW.env       versions.env lines that changed (empty if none)
   build_report.py major OLD.env NEW.env      major-version review notice (empty if none)
   build_report.py layers TOTAL_BYTES         image size and largest layers; reads
@@ -11,6 +11,7 @@
                                              the TAP output of tests/run.sh
 """
 import json
+import os
 import re
 import sys
 
@@ -43,13 +44,25 @@ def short(value):
     return re.sub(r"(sha256:[0-9a-f]{12})[0-9a-f]+", r"\1...", value)
 
 
+def extra_names():
+    """versions.env key to catalog name for each optional extra, from bump_versions.EXTRAS."""
+    # Only the versions mode may call this. The bump-pr action runs the major mode from a
+    # standalone copy of this file, where bump_versions and its imports are not importable.
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import bump_versions
+    return {key: extra for key, _package, extra in bump_versions.EXTRAS}
+
+
 def versions(path):
     with open(path) as f:
         data = json.load(f)
     pins, apt = data.get("pins", {}), data.get("apt", {})
+    extras = extra_names()
     lines = ["### Versions in this build", "", "| Component | Version |", "|---|---|"]
     for key in sorted(pins):
-        if key.endswith("_VERSION"):
+        if key.endswith("_VERSION") and key not in extras:
             name = key[:-len("_VERSION")].lower().replace("_", "-")
             lines.append("| %s | %s |" % (cell(name), cell(pins[key])))
     for name in KEY_APT:
@@ -58,6 +71,12 @@ def versions(path):
     lines += ["", "Base image: `%s`. apt snapshot: `%s`. %d apt packages; the full list is in "
               "`/etc/agentainer/versions.json` in the image." % (
                   short(pins.get("BASE_IMAGE", "?")), pins.get("APT_SNAPSHOT", "?"), len(apt))]
+    # Extras are pinned in the image's catalog but installed only by agentainer-extras install.
+    listed = sorted((extras[key], pins[key]) for key in pins if key in extras)
+    if listed:
+        lines += ["", "### Optional extras (not installed)", "", "| Extra | Pinned version |", "|---|---|"]
+        lines += ["| %s | %s |" % (cell(name), cell(version)) for name, version in listed]
+        lines += ["", "Install one in a container with `agentainer-extras install NAME`."]
     return "\n".join(lines) + "\n\n"
 
 
