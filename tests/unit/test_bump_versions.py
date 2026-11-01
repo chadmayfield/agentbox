@@ -1,10 +1,12 @@
+import contextlib
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 import bump_versions as bv  # noqa: E402
@@ -195,6 +197,45 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(bv.LookupFailed):
             bv.parse_claude_manifest(doc, "2.1.292")
 
+    def test_node_index_picks_newest_of_the_major(self):
+        doc = [{"version": "v28.0.0"}, {"version": "v26.14.0-rc.1"}, {"version": "v26.9.1"},
+               {"version": "v26.13.0"}, {"version": "v24.22.2"}, {"version": "v26.99.0\n"}]
+        self.assertEqual(bv.parse_node_index(doc, 26), "26.13.0")
+
+    def test_node_index_with_an_unexpected_shape_is_refused(self):
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_index({"version": "v26.13.0"}, 26)
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_index(["v26.13.0"], 26)
+
+    def test_node_index_skips_entries_that_are_not_objects(self):
+        self.assertEqual(bv.parse_node_index(["junk", {"version": "v26.13.0"}], 26), "26.13.0")
+
+    def test_node_index_without_the_major_is_refused(self):
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_index([{"version": "v24.22.2"}], 26)
+
+    def test_node_shasums_gives_both_linux_hashes(self):
+        text = ("%s  node-v26.13.0-linux-arm64.tar.xz\n%s  node-v26.13.0-linux-x64.tar.xz\n"
+                "%s  node-v26.13.0-darwin-arm64.tar.gz\n"
+                "%s  node-v26.13.0-linux-x64-musl.tar.xz\n%s  node-v26.13.0-linux-x64.tar.xz.sig\n"
+                "%s  node-v26.13.01-linux-x64.tar.xz\n%s  *node-v26.13.0-linux-x64.tar.xz\n"
+                ) % ("a" * 64, "b" * 64, "c" * 64, "d" * 64, "d" * 64, "d" * 64, "d" * 64)
+        self.assertEqual(bv.parse_node_shasums(text, "26.13.0"),
+                         {"NODE_VERSION": "26.13.0", "NODE_SHA256_AMD64": "b" * 64, "NODE_SHA256_ARM64": "a" * 64})
+
+    def test_node_shasums_missing_an_arch_is_refused(self):
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_shasums("%s  node-v26.13.0-linux-x64.tar.xz\n" % ("b" * 64), "26.13.0")
+
+    def test_node_shasums_with_a_bad_hash_is_refused(self):
+        text = "%s  node-v26.13.0-linux-x64.tar.xz\n%s  node-v26.13.0-linux-arm64.tar.xz\n" % ("B" * 64, "a" * 64)
+        with self.assertRaises(bv.LookupFailed):
+            bv.parse_node_shasums(text, "26.13.0")
+
+    def test_node_resolver_is_registered(self):
+        self.assertIn(bv.r_node, bv.RESOLVERS)
+
 
 @unittest.skipUnless(shutil.which("gpg"), "gpg is not installed")
 class SignatureTests(unittest.TestCase):
@@ -379,6 +420,10 @@ class ValidationTests(unittest.TestCase):
                 self.assertIsNotNone(bv.invalid("AGY_URL_AMD64", url))
         self.assertIsNone(bv.invalid("AGY_URL_AMD64", good["url"]))
 
+    def test_node_pins_are_accepted(self):
+        self.assertIsNone(bv.invalid("NODE_VERSION", "26.13.0"))
+        self.assertIsNone(bv.invalid("NODE_SHA256_AMD64", "b" * 64))
+
 
 class WriteTests(unittest.TestCase):
     def setUp(self):
@@ -442,6 +487,20 @@ class WriteTests(unittest.TestCase):
             with self.subTest(update=update):
                 self.assertEqual(bv.main(["--file", self.path], resolvers=[lambda u=update: u]), 1)
                 self.assertEqual(self.read(), "A=1\n")
+
+    def test_node_with_a_bad_signature_leaves_file_untouched(self):
+        shasums = ("%s  node-v26.99.0-linux-x64.tar.xz\n%s  node-v26.99.0-linux-arm64.tar.xz\n"
+                   % ("b" * 64, "a" * 64)).encode()
+        err = io.StringIO()
+        with patch.object(bv, "fetch_json", return_value=[{"version": "v26.99.0"}]) as fj, \
+                patch.object(bv, "fetch_bytes", side_effect=[shasums, b"not a signature"]) as fb, \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(bv.main(["--file", self.path, "--only", "r_node"]), 1)
+        fj.assert_called_once_with("https://nodejs.org/dist/index.json")
+        self.assertEqual(fb.call_args_list, [call("https://nodejs.org/dist/v26.99.0/SHASUMS256.txt"),
+                                             call("https://nodejs.org/dist/v26.99.0/SHASUMS256.txt.sig")])
+        self.assertIn("signature", err.getvalue())
+        self.assertEqual(self.read(), "A=1\n")
 
     def test_current_pins_pass_validation(self):
         here = os.path.dirname(os.path.abspath(__file__))

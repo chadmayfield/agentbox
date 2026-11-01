@@ -521,6 +521,52 @@ def r_claude():
     return parse_claude_manifest(json.loads(manifest), ver)
 
 
+NODE_DIST = "https://nodejs.org/dist"
+NODE_MAJOR = 26
+
+
+def parse_node_index(doc, major):
+    """Newest release of one Node.js major from nodejs.org/dist/index.json, without the v."""
+    if not isinstance(doc, list):
+        raise LookupFailed("node: unexpected index.json shape")
+    pattern = re.compile(r"v(%d\.[0-9]+\.[0-9]+)" % major)
+    found = [m.group(1) for m in (pattern.fullmatch(str(e.get("version", ""))) for e in doc if isinstance(e, dict))
+             if m]
+    if not found:
+        raise LookupFailed("node: no release of major %d in index.json" % major)
+    return max(found, key=version_key)
+
+
+def parse_node_shasums(text, ver):
+    """Both linux tarball hashes for one version from SHASUMS256.txt."""
+    names = {"NODE_SHA256_AMD64": "node-v%s-linux-x64.tar.xz" % ver,
+             "NODE_SHA256_ARM64": "node-v%s-linux-arm64.tar.xz" % ver}
+    hashes = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            hashes[parts[1]] = parts[0]
+    out = {"NODE_VERSION": ver}
+    for key, name in names.items():
+        digest = hashes.get(name, "")
+        if not HEX64.match(digest):
+            raise LookupFailed("node: no valid sha256 for %s in SHASUMS256.txt" % name)
+        out[key] = digest
+    return out
+
+
+def r_node():
+    # nodejs.org signs SHASUMS256.txt with the release keys pinned in scripts/keys.
+    ver = parse_node_index(fetch_json(NODE_DIST + "/index.json"), NODE_MAJOR)
+    base = "%s/v%s/SHASUMS256.txt" % (NODE_DIST, ver)
+    shasums = fetch_bytes(base)
+    sig = fetch_bytes(base + ".sig")
+    with open(NODE_KEYRING, "rb") as f:
+        key = f.read()
+    verify_signature(shasums, sig, key, NODE_KEY_FINGERPRINTS)
+    return parse_node_shasums(shasums.decode(), ver)
+
+
 def r_agy():
     out = {}
     versions = set()
@@ -584,7 +630,7 @@ def r_buildkit():
 
 
 RESOLVERS = [r_base, r_go, r_rust, r_yq, r_gh, r_uv, r_ruff, r_trivy, r_abtop, r_unslop, r_golangci,
-             r_kubectl, r_helm, r_tea, r_claude, r_codex, r_agy, r_opencode, r_k8s_images, r_buildkit]
+             r_kubectl, r_helm, r_tea, r_claude, r_node, r_codex, r_agy, r_opencode, r_k8s_images, r_buildkit]
 
 
 def main(argv=None, resolvers=None):
