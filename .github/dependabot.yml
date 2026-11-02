@@ -24,3 +24,19 @@ updates:
     groups:
       visual-test-dependencies:
         patterns: ["*"]
+  # Extras catalog lockfiles. scripts/bump_versions.py updates them together with their
+  # versions.env pins, the registry signature checks and the 7-day minimum release age,
+  # so Dependabot should open no pull requests here. `open-pull-requests-limit: 0` turns
+  # off version updates. Security updates read this entry only when it has no
+  # `target-branch` ("Configuring Dependabot security updates"), so it has none and
+  # pull requests go to the default branch. That `ignore` blocks security updates is not
+  # verified in GitHub's docs. Alerts come from the dependency graph, not from this file
+  # (not verified either).
+  - package-ecosystem: npm
+    directories:
+      - /rootfs/usr/local/share/agentainer/extras/*
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: "*"
